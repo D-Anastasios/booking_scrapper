@@ -3,59 +3,65 @@ Author: Anastasios Dadiotis
 Date Created: 04/10/2025
 Last Modified: 04/10/2025
 Description:
-    A simple and polite web scraper for Booking.com using `requests` and `BeautifulSoup`.
-    The script can:
-      • Fetch hotel search results from Booking.com based on city, date, and parameters.
-      • Parse hotel names, links, location, prices, and ratings.
-      • Normalize and clean price strings, including converting them to numeric format.
-      • Read multiple search URLs from a CSV file or list, scrape them all, and save the results.
-      • Write cleaned data to a UTF-8-encoded CSV (safe for Excel display).
+    Polite Booking.com scraper using requests + BeautifulSoup.
+    - Fetches search results (name, link, location, price, score, reviews)
+    - Normalizes price strings and extracts numeric values
+    - Saves fetched HTML into ./debug/ (ignored by Git)
+    - Supports multiple URLs (list or CSV input)
+    - Writes results to timestamped UTF-8 CSV (Excel-friendly)
 
 Usage:
     python 01_scrap_booking.py
 """
 
-import time, random, csv, re, sys
+import time, random, csv, re, sys, unicodedata
 from pathlib import Path
 from urllib.parse import urlencode
-import unicodedata
+from datetime import datetime
+from typing import List, Iterable, Optional
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
-from typing import List, Iterable, Optional
 
-# ========= 0) Utilities for price/encoding =========
+# ========= 0) Globals & timestamp helpers =========
+BASE_URL = "https://www.booking.com/searchresults.html"
+DEBUG_DIR = Path("debug")
+DEBUG_DIR.mkdir(exist_ok=True)
+
+def timestamp() -> str:
+    """Return a compact timestamp string like 20251004_183015."""
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# ========= 1) Utilities for price/encoding =========
 def clean_text(s: Optional[str]) -> Optional[str]:
-    """Normalize unicode, convert NBSPs to spaces, trim."""
+    """Normalize unicode, replace NBSPs, strip."""
     if not s:
         return s
     s = unicodedata.normalize("NFKC", s)
-    # replace non-breaking spaces (U+00A0, U+202F) with regular space
     s = s.replace("\u00A0", " ").replace("\u202F", " ")
     return s.strip()
 
 def price_to_float(s: Optional[str]) -> Optional[float]:
-    """Extract a numeric price (supports EU/US separators)."""
+    """Extract a numeric price (handles EU and US separators)."""
     if not s:
         return None
     s = clean_text(s)
-
-    # Keep only digits and separators
     num = re.sub(r"[^\d.,]", "", s)
-    # If EU-style with both . and , and comma as decimal
+    # EU style like "1.234,56" → "1234.56"
     if num.count(",") == 1 and num.count(".") >= 1 and num.rfind(",") > num.rfind("."):
         num = num.replace(".", "").replace(",", ".")
     else:
-        # Otherwise drop thousands commas
         num = num.replace(",", "")
     try:
         return float(num)
     except ValueError:
         return None
 
-# ========= 1) Session & URL builders =========
+# ========= 2) Session & URL builders =========
 def make_session() -> requests.Session:
+    """Configured requests.Session with retries and realistic headers."""
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -79,10 +85,9 @@ def make_session() -> requests.Session:
     s.mount("http://", HTTPAdapter(max_retries=retry))
     return s
 
-BASE_URL = "https://www.booking.com/searchresults.html"
-
 def build_url(city="Lefkada", checkin="2025-10-04", checkout="2025-10-05",
               adults=2, rooms=1, children=0, currency="EUR", offset=0) -> str:
+    """Construct a Booking.com search URL with common params."""
     params = {
         "ss": city,
         "checkin": checkin,
@@ -91,25 +96,24 @@ def build_url(city="Lefkada", checkin="2025-10-04", checkout="2025-10-05",
         "no_rooms": rooms,
         "group_children": children,
         "selected_currency": currency,
-        "offset": offset,     # 0, 25, 50...
-        "order": "price",     # optional
+        "offset": offset,      # 0, 25, 50 ...
+        "order": "price",      # optional
         "lang": "en-gb",
     }
     return f"{BASE_URL}?{urlencode(params)}"
 
-# ========= 2) Parsing =========
+# ========= 3) Parsing =========
 def looks_like_block(html_text: str) -> bool:
+    """Detect basic signs of bot/guard/captcha pages."""
     t = html_text.lower()
-    return any(
-        k in t for k in [
-            "unusual traffic", "verify you are a human", "enable javascript", "captcha"
-        ]
-    )
+    return any(k in t for k in ["unusual traffic", "verify you are a human", "enable javascript", "captcha"])
 
 def safe_text(el):
+    """Safely extract text from a BeautifulSoup element."""
     return el.get_text(strip=True) if el else None
 
-def parse_cards(html: str):
+def parse_cards(html: str) -> List[dict]:
+    """Parse hotel cards and return rows of extracted fields."""
     soup = BeautifulSoup(html, "lxml")
     cards = soup.select('div[data-testid="property-card"]')
     out = []
@@ -127,7 +131,7 @@ def parse_cards(html: str):
         rel   = link_el.get("href") if link_el else None
         url   = f"https://www.booking.com{rel}" if rel and rel.startswith("/") else rel
         addr  = clean_text(safe_text(addr_el))
-        price_raw = safe_text(price_el)
+        price_raw  = safe_text(price_el)
         price_text = clean_text(price_raw)
         price_eur  = price_to_float(price_raw)
 
@@ -142,23 +146,28 @@ def parse_cards(html: str):
             "name": title,
             "url": url,
             "location": addr,
-            "price_text": price_text,  # now human-friendly (no NBSP mojibake)
-            "price_eur": price_eur,    # numeric for analysis
+            "price_text": price_text,
+            "price_eur": price_eur,
             "score": score,
-            "reviews_raw": reviews_raw
+            "reviews_raw": reviews_raw,
         })
     return out
 
-# ========= 3) Scrape helpers (one URL or many) =========
-def fetch_html(session: requests.Session, url: str, save_debug: Optional[Path]=None) -> Optional[str]:
+# ========= 4) Scrape helpers =========
+def fetch_html(session: requests.Session, url: str, debug_name: Optional[str]=None) -> Optional[str]:
+    """
+    GET a URL, save HTML into ./debug/ if debug_name is provided, return text or None.
+    """
     print(f"[GET] {url}")
     resp = session.get(url, timeout=30)
     print(f"[INFO] HTTP status = {resp.status_code}")
-    # Ensure proper decoding
     resp.encoding = "utf-8"
-    if save_debug:
-        save_debug.write_text(resp.text, encoding="utf-8")
-        print(f"[debug] Saved HTML to {save_debug}")
+
+    if debug_name:
+        path = DEBUG_DIR / debug_name
+        path.write_text(resp.text, encoding="utf-8")
+        print(f"[debug] Saved HTML to {path}")
+
     if resp.status_code != 200:
         print("[WARN] Non-200 status—skipping.")
         return None
@@ -167,8 +176,9 @@ def fetch_html(session: requests.Session, url: str, save_debug: Optional[Path]=N
         return None
     return resp.text
 
-def scrape_search_url(session: requests.Session, url: str) -> List[dict]:
-    html = fetch_html(session, url, save_debug=Path("booking_debug.html"))
+def scrape_search_url(session: requests.Session, url: str, dbg_file: str) -> List[dict]:
+    """Scrape a single search URL; saves HTML to debug/ and returns parsed rows."""
+    html = fetch_html(session, url, debug_name=dbg_file)
     if not html:
         return []
     rows = parse_cards(html)
@@ -176,11 +186,18 @@ def scrape_search_url(session: requests.Session, url: str) -> List[dict]:
     return rows
 
 def scrape_urls(urls: Iterable[str], min_delay=3, max_delay=6) -> List[dict]:
+    """
+    Scrape multiple URLs sequentially with polite sleeps.
+    Saves timestamped debug HTML per URL to ./debug/.
+    """
     s = make_session()
     all_rows: List[dict] = []
+    urls = list(urls)  # to count
+    ts = timestamp()
     for i, url in enumerate(urls, start=1):
-        print(f"\n[PROGRESS] {i}/{len(list(urls)) if hasattr(urls, '__len__') else '?'} : scraping URL")
-        rows = scrape_search_url(s, url)
+        print(f"\n[PROGRESS] {i}/{len(urls)} : scraping URL")
+        dbg_file = f"booking_debug_{i:03d}_{ts}.html"
+        rows = scrape_search_url(s, url, dbg_file)
         all_rows.extend(rows)
         d = random.uniform(min_delay, max_delay)
         print(f"[SLEEP] Sleeping {d:.1f}s to be polite")
@@ -188,6 +205,9 @@ def scrape_urls(urls: Iterable[str], min_delay=3, max_delay=6) -> List[dict]:
     return all_rows
 
 def urls_from_csv(csv_path: str, url_col: str = "url") -> List[str]:
+    """
+    Load a column of URLs from a CSV file (UTF-8).
+    """
     urls = []
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -200,35 +220,40 @@ def urls_from_csv(csv_path: str, url_col: str = "url") -> List[str]:
     print(f"[INFO] Loaded {len(urls)} URLs from {csv_path}")
     return urls
 
-def write_csv(rows: List[dict], out_path: str):
+def write_csv_timestamped(rows: List[dict], base_name: str) -> str:
+    """
+    Write rows to a timestamped CSV in UTF-8 with BOM.
+    Returns the output path.
+    """
     if not rows:
         print("[INFO] No rows to write.")
-        return
+        return ""
     keys = ["name", "url", "location", "price_text", "price_eur", "score", "reviews_raw"]
-    # utf-8-sig helps Excel display € properly
+    out_path = f"{base_name}_{timestamp()}.csv"
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=keys)
         w.writeheader()
         w.writerows(rows)
     print(f"[DONE] Wrote {len(rows)} rows -> {out_path}")
+    return out_path
 
-# ========= 4) Example usages =========
+# ========= 5) Example usage =========
 if __name__ == "__main__":
-    # A) Single built URL (like your current flow)
+    # Example A: single built URL
     url = build_url(city="Lefkada", checkin="2025-10-04", checkout="2025-10-05",
                     adults=6, rooms=3, children=0, currency="EUR", offset=0)
     rows = scrape_urls([url], min_delay=2, max_delay=4)
-    write_csv(rows, "booking_lefkada.csv")
+    write_csv_timestamped(rows, base_name="booking_lefkada")
 
-    # B) OR: Pass an explicit list of URLs
+    # Example B: multiple cities (uncomment to use)
     # urls = [
-    #     build_url(city="Paris",  checkin="2025-10-20", checkout="2025-10-22", adults=2, rooms=1),
-    #     build_url(city="Lyon",   checkin="2025-10-20", checkout="2025-10-22", adults=2, rooms=1),
+    #     build_url(city="Paris", checkin="2025-10-20", checkout="2025-10-22", adults=2, rooms=1, currency="EUR"),
+    #     build_url(city="Lyon",  checkin="2025-10-20", checkout="2025-10-22", adults=2, rooms=1, currency="EUR"),
     # ]
     # rows = scrape_urls(urls, min_delay=2, max_delay=5)
-    # write_csv(rows, "booking_multi_cities.csv")
+    # write_csv_timestamped(rows, base_name="booking_multi_cities")
 
-    # C) OR: Load URLs from a CSV with a 'url' column
+    # Example C: read URLs from a CSV with a 'url' column (uncomment to use)
     # url_list = urls_from_csv("search_urls.csv", url_col="url")
     # rows = scrape_urls(url_list, min_delay=2, max_delay=5)
-    # write_csv(rows, "booking_from_csv.csv")
+    # write_csv_timestamped(rows, base_name="booking_from_csv")
