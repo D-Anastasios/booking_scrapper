@@ -13,6 +13,15 @@ Description:
     - Saves fetched HTML into ./debug/ (ignored by Git), timestamped
     - Supports multiple URLs (list or CSV input)
     - Writes results to timestamped UTF-8 CSV (Excel-friendly)
+
+Required Packages:
+    pip install requests beautifulsoup4 lxml playwright urllib3
+    playwright install chromium
+    
+    Optional (for better bot detection evasion):
+    pip install playwright-stealth
+
+
 Usage:
     python 01_scrap_booking.py
 """
