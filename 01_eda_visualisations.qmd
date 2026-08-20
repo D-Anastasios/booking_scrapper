@@ -1,0 +1,3652 @@
+---
+title: "Erato Project — Exploratory Data Analysis"
+author: "Anastasios Dadiotis"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    theme: flatly
+    code-fold: true
+    code-tools: true
+    self-contained: true
+    fig-width: 9
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+  echo: true
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+# clean environment
+rm(list = ls())
+```
+
+```{r setup}
+library(here)
+library(tidyverse)
+library(skimr)
+library(naniar)
+library(ggcorrplot)
+library(patchwork)
+library(scales)
+library(gt)
+
+library(lme4)
+library(lmerTest)   # optional: p-values for fixed effects
+library(performance) # optional: diagnostics
+
+
+library(conflicted)
+
+# only needed if conflicted is still loaded somewhere else in startup files
+if ("package:conflicted" %in% search()) {
+  conflicted::conflicts_prefer(
+    dplyr::filter,
+    dplyr::lag,
+    dplyr::select,
+    dplyr::summarise,
+    dplyr::mutate,
+    dplyr::rename,
+    dplyr::arrange,
+    .quiet = TRUE
+  )
+}
+
+# ── Theme ──────────────────────────────────────────────────────────────────────
+theme_erato <- function() {
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.title    = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "grey40", size = 11),
+      strip.text    = element_text(face = "bold"),
+      panel.grid.minor = element_blank()
+    )
+}
+theme_set(theme_erato())
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+fig_path <- here("Figures", "01_visualisations_explorations")
+
+save_fig <- function(name, width = 9, height = 6) {
+  ggsave(
+    filename = file.path(fig_path, paste0(name, ".png")),
+    width = width, height = height, dpi = 300, bg = "white"
+  )
+}
+```
+
+```{r load-data}
+df <- read_csv(here("../Data","scrapping2_6 adults_villas_privatepool", "data_booking_clean_all.csv"))
+
+# ── Light cleaning for EDA ─────────────────────────────────────────────────────
+df <- df |>
+  mutate(
+    month     = factor(month, levels = c("jan","feb","mar","apr","may","jun",
+                                         "jul","aug","sep","oct","nov","dec")),
+    location  = str_to_title(location),
+    rating_cat = factor(rating_cat),
+    has_discount = !is.na(discount_pct)
+  )
+
+glimpse(df)
+```
+
+## 1 Overview & Missingness
+
+```{r skim}
+skim(df)
+```
+
+```{r missingness-plot}
+#| fig-cap: "Proportion of missing values per variable"
+
+vis_miss(df, sort_miss = TRUE) +
+  labs(title = "Missing Data Map",
+       subtitle = "Each column sorted by share of NAs") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+save_fig("00_missing_data")
+```
+
+```{r missing-upset}
+#| fig-cap: "Co-occurrence pattern of missingness across key variables"
+
+gg_miss_upset(
+  df |> select(price, rating, comfort_rate, sqm,
+               bathrooms, number_comments, discount_pct),
+  nsets = 7
+)
+```
+
+------------------------------------------------------------------------
+
+## 2 Price
+
+### 2.1 Distribution
+
+```{r price-dist}
+#| fig-cap: "Price distribution with median line"
+
+p1 <- ggplot(df, aes(x = price)) +
+  geom_histogram(bins = 40, fill = "#4E79A7", color = "white", alpha = .85) +
+  geom_vline(xintercept = median(df$price, na.rm = TRUE),
+             linetype = "dashed", color = "firebrick", linewidth = .8) +
+  annotate("text", x = median(df$price, na.rm = TRUE) + 150, y = Inf,
+           label = paste0("Median: €", comma(median(df$price, na.rm = TRUE))),
+           vjust = 2, hjust = 0, color = "firebrick", size = 3.5) +
+  scale_x_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Price Distribution", x = "Price (€)", y = "Count")
+
+p2 <- ggplot(df, aes(x = price)) +
+  geom_boxplot(fill = "#4E79A7", alpha = .7, outlier.color = "firebrick",
+               outlier.alpha = .6) +
+  scale_x_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Price — Boxplot", x = "Price (€)") +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+p1 / p2 + plot_layout(heights = c(3, 1))
+save_fig("01_price_distribution")
+```
+
+### 2.2 Price by Location
+
+```{r price-location}
+#| fig-cap: "Price distribution per location"
+
+df |>
+  filter(!is.na(price)) |>
+  mutate(location = fct_reorder(location, price, median)) |>
+  ggplot(aes(x = price, y = location, fill = location)) +
+  geom_boxplot(alpha = .75, outlier.alpha = .4, show.legend = FALSE) +
+  scale_x_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Price by Location",
+       subtitle = "Ordered by median price",
+       x = "Price (€)", y = NULL)
+
+save_fig("02_price_by_location")
+```
+
+### 2.3 Price by Month
+
+```{r price-month}
+#| fig-cap: "Median price per month with observation count"
+
+df |>
+  filter(!is.na(price), !is.na(month)) |>
+  group_by(month) |>
+  summarise(median_price = median(price),
+            n = n(), .groups = "drop") |>
+  ggplot(aes(x = month, y = median_price, group = 1)) +
+  geom_line(color = "#4E79A7", linewidth = 1.1) +
+  geom_point(aes(size = n), color = "#4E79A7", alpha = .8) +
+  geom_text(aes(label = paste0("n=", n)), vjust = -1.2, size = 3, color = "grey40") +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  scale_size_continuous(range = c(3, 8)) +
+  labs(title = "Median Price by Month",
+       subtitle = "Point size = number of listings",
+       x = NULL, y = "Median Price (€)", size = "n listings")
+
+save_fig("03_price_by_month")
+```
+
+### 2.4 Price by Location × Month (Heatmap)
+
+```{r price-heatmap}
+#| fig-cap: "Median price heatmap across location and month"
+#| fig-height: 5
+
+df |>
+  filter(!is.na(price), !is.na(month)) |>
+  group_by(location, month) |>
+  summarise(median_price = median(price), .groups = "drop") |>
+  ggplot(aes(x = month, y = location, fill = median_price)) +
+  geom_tile(color = "white", linewidth = .5) +
+  geom_text(aes(label = comma(round(median_price))), size = 3, color = "white") +
+  scale_fill_viridis_c(option = "C", labels = label_dollar(prefix = "€"), name = "Median €") +
+  labs(title = "Median Price — Location × Month",
+       x = NULL, y = NULL)
+
+save_fig("04_price_heatmap", height = 5)
+
+df |>
+  filter(!is.na(price), !is.na(month)) |>
+  group_by(location, month) |>
+  summarise(median_price = median(price), .groups = "drop") |>
+  group_by(location) |>
+  mutate(pct_change = (median_price - min(median_price)) / min(median_price) * 100) |>
+  ungroup() |>
+  ggplot(aes(x = month, y = location, fill = pct_change)) +
+  geom_tile(color = "white", linewidth = .5) +
+  geom_text(aes(label = paste0("+", round(pct_change), "%")), size = 3, color = "white") +
+  scale_fill_viridis_c(option = "B", name = "% above\ncheapest month") +
+  labs(title = "Price Seasonality — % Above Cheapest Month",
+       subtitle = "Each location normalised to its own minimum",
+       x = NULL, y = NULL)
+
+save_fig("04.1_price_seasonality", height = 5)
+
+# df |>
+#   filter(!is.na(price), !is.na(month)) |>
+#   group_by(location, month) |>
+#   summarise(median_price = median(price), .groups = "drop") |>
+#   group_by(location) |>
+#   mutate(z = (median_price - mean(median_price)) / sd(median_price)) |>
+#   ungroup() |>
+#   ggplot(aes(x = month, y = location, fill = z)) +
+#   geom_tile(color = "white", linewidth = .5) +
+#   geom_text(aes(label = round(z, 1)), size = 3, color = "white") +
+#   scale_fill_gradient2(low = "#4E79A7", mid = "white", high = "#E15759",
+#                        midpoint = 0, name = "Z-score") +
+#   labs(title = "Price Seasonality — Standardised (Z-score)",
+#        subtitle = "How unusual each month is relative to each location's own average",
+#        x = NULL, y = NULL)
+# 
+# save_fig("04.2_price_seasonality_zscore", height = 5)
+
+df |>
+  filter(!is.na(price), !is.na(month),
+         month %in% c("aug", "sep", "oct")) |>
+  group_by(location, month) |>
+  summarise(
+    median_price = median(price),
+    sd_price     = sd(price),
+    n            = n(),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = month, y = median_price, group = location)) +
+  geom_ribbon(aes(ymin = median_price - sd_price,
+                  ymax = median_price + sd_price),
+              fill = "#4E79A7", alpha = .2) +
+  geom_line(color = "#4E79A7", linewidth = 1) +
+  geom_point(aes(size = n), color = "#4E79A7") +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  scale_size_continuous(range = c(2, 6)) +
+  facet_wrap(~location, scales = "free_y") +
+  labs(title = "Price Trend Aug–Oct with ±1 SD",
+       subtitle = "Each panel = one location | Ribbon = ±1 SD | free y-scale to highlight within-location movement",
+       x = NULL, y = "Median Price (€)", size = "n listings")
+
+save_fig("04.3_price_trend_aug_oct", height = 5)
+```
+
+------------------------------------------------------------------------
+
+## 3 Ratings
+
+### 3.1 Overall Rating Distribution
+
+```{r rating-dist}
+#| fig-cap: "Distribution of overall rating score"
+
+df <- df |>
+  mutate(
+    rating       = if_else(rating > 10, rating / 10, rating),
+    comfort_rate = if_else(comfort_rate > 10, comfort_rate / 10, comfort_rate)
+  )
+
+p1 <- ggplot(df |> filter(!is.na(rating)), aes(x = rating)) +
+  geom_histogram(bins = 25, fill = "#F28E2B", color = "white", alpha = .85) +
+  labs(title = "Overall Rating", x = "Rating", y = "Count") +
+  # limit x-axis to 5–10 to exclude outliers
+  scale_x_continuous(limits = c(5, 10))
+
+p2 <- ggplot(df |> filter(!is.na(comfort_rate)), aes(x = comfort_rate)) +
+  geom_histogram(bins = 25, fill = "#59A14F", color = "white", alpha = .85) +
+  labs(title = "Comfort Rate", x = "Comfort Rating", y = "Count")
+
+p1 + p2
+save_fig("05_rating_distributions")
+```
+
+### 3.2 Rating Category Breakdown
+
+```{r rating-cat}
+#| fig-cap: "Count of listings per rating category"
+
+df |>
+  filter(!is.na(rating_cat)) |>
+  count(rating_cat) |>
+  mutate(rating_cat = fct_reorder(rating_cat, n)) |>
+  ggplot(aes(x = n, y = rating_cat, fill = rating_cat)) +
+  geom_col(alpha = .85, show.legend = FALSE) +
+  geom_text(aes(label = n), hjust = -.2, size = 3.5) +
+  labs(title = "Listings by Rating Category",
+       x = "Number of Listings", y = NULL) +
+  expand_limits(x = max(count(df |> filter(!is.na(rating_cat)), rating_cat)$n) * 1.1)
+
+save_fig("06_rating_category")
+```
+
+### 3.3 Rating vs Price
+
+```{r rating-price}
+#| fig-cap: "Scatter plot of rating vs price coloured by location"
+
+ggplot(df |> filter(!is.na(rating), !is.na(price)),
+       aes(x = rating, y = price, color = location)) +
+  geom_point(alpha = .6, size = 0.5) +
+  geom_smooth(aes(group = 1), method = "lm", se = TRUE,
+              color = "grey30", linewidth = .8, linetype = "dashed") +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Rating vs Price",
+       subtitle = "Dashed line = overall linear trend",
+       x = "Overall Rating", y = "Price (€)", color = "Location")
+
+save_fig("07_rating_vs_price")
+
+# compute fences
+price_fences <- df |>
+  summarise(
+    q1 = quantile(price, .25, na.rm = TRUE),
+    q3 = quantile(price, .75, na.rm = TRUE)
+  ) |>
+  mutate(
+    iqr         = q3 - q1,
+    lower_fence = q1 - 1.5 * iqr,
+    upper_fence = q3 + 1.5 * iqr
+  )
+# compute pearson r per location
+pearson_r <- df |>
+  filter(
+    !is.na(rating), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  group_by(location) |>
+  summarise(r = cor(rating, price, use = "complete.obs"), .groups = "drop") |>
+  mutate(label = paste0("r = ", round(r, 2)))
+
+df |>
+  filter(
+    !is.na(rating), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  ggplot(aes(x = rating, y = price)) +
+  geom_point(alpha = .6, size = 1, color = "#4E79A7") +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "grey30", linewidth = .8, linetype = "dashed") +
+  geom_text(data = pearson_r, aes(label = label),
+            x = -Inf, y = Inf, hjust = -0.2, vjust = 1.5,
+            size = 3.5, fontface = "bold", color = "firebrick",
+            inherit.aes = FALSE) +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  facet_wrap(~location, scales = "free_y") +
+  labs(title = "Rating vs Price by Location",
+       subtitle = "Price outliers removed via IQR rule | r = Pearson correlation",
+       x = "Overall Rating", y = "Price (€)")
+
+save_fig("07.1_rating_vs_price_by_location")
+
+pearson_r <- df |>
+  filter(
+    !is.na(rating), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence,
+    rating >= 7
+  ) |>
+  group_by(location) |>
+  summarise(r = cor(rating, price, use = "complete.obs"), .groups = "drop") |>
+  mutate(label = paste0("r = ", round(r, 2)))
+
+df |>
+  filter(
+    !is.na(rating), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence,
+    rating >= 7
+  ) |>
+  ggplot(aes(x = rating, y = price)) +
+  geom_point(alpha = .6, size = 1, color = "#4E79A7") +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "grey30", linewidth = .8, linetype = "dashed") +
+  geom_text(data = pearson_r, aes(label = label),
+            x = -Inf, y = Inf, hjust = -0.2, vjust = 1.5,
+            size = 3.5, fontface = "bold", color = "firebrick",
+            inherit.aes = FALSE) +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  facet_wrap(~location, scales = "free_y") +
+  labs(title = "Rating vs Price by Location (Rating ≥ 5)",
+       subtitle = "Price outliers removed via IQR rule | ratings below 5 excluded | r = Pearson correlation",
+       x = "Overall Rating", y = "Price (€)")
+```
+
+------------------------------------------------------------------------
+
+## 4 Property Characteristics
+
+### 4.1 Bedrooms, Bathrooms & Beds
+
+```{r rooms-dist}
+#| fig-cap: "Distribution of bedrooms, bathrooms and beds"
+
+rooms <- df |>
+  select(bedrooms, bathrooms, beds) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "value") |>
+  filter(!is.na(value))
+
+ggplot(rooms, aes(x = value, fill = variable)) +
+  geom_histogram(binwidth = 1, color = "white", alpha = .85, show.legend = FALSE) +
+  facet_wrap(~variable, scales = "free_x") +
+  scale_fill_manual(values = c("#4E79A7","#F28E2B","#59A14F")) +
+  labs(title = "Room Count Distributions",
+       x = "Count", y = "Frequency")
+
+save_fig("08_room_distributions")
+```
+
+### 4.2 Bedrooms vs Price
+
+```{r bedrooms-price}
+#| fig-cap: "Price by number of bedrooms"
+
+df |>
+  filter(!is.na(beds), !is.na(price)) |>
+  mutate(bedrooms = factor(beds)) |>
+  ggplot(aes(x = bedrooms, y = price, fill = bedrooms)) +
+  geom_boxplot(alpha = .75, outlier.alpha = .4, show.legend = FALSE) +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Price by Number of Beds",
+       x = "Beds", y = "Price (€)")
+
+save_fig("09_beds_vs_price")
+
+beds_pearson <- df |>
+  filter(
+    !is.na(beds), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  group_by(beds) |>
+  summarise(r = cor(beds, price, use = "complete.obs"), .groups = "drop") |>
+  mutate(
+    beds  = factor(beds),
+    label = paste0("r = ", round(r, 2))
+  )
+
+df |>
+  filter(
+    !is.na(beds), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  mutate(beds = factor(beds)) |>
+  ggplot(aes(x = beds, y = price, fill = beds)) +
+  geom_boxplot(alpha = .75, outlier.alpha = .4, show.legend = FALSE) +
+  geom_text(data = beds_pearson, aes(x = beds, label = label),
+            y = Inf, vjust = 1.5, size = 3.2,
+            fontface = "bold", color = "firebrick",
+            inherit.aes = FALSE) +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Price by Number of Beds",
+       subtitle = "Price outliers removed via IQR rule | r = Pearson correlation per group",
+       x = "Beds", y = "Price (€)")
+
+# single overall r
+overall_r <- df |>
+  filter(
+    !is.na(beds), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  summarise(r = cor(beds, price, use = "complete.obs")) |>
+  mutate(label = paste0("r = ", round(r, 2)))
+
+# r per location
+location_r <- df |>
+  filter(
+    !is.na(beds), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  group_by(location) |>
+  summarise(r = cor(beds, price, use = "complete.obs"), .groups = "drop") |>
+  mutate(label = paste0("r = ", round(r, 2)))
+
+# overall plot
+df |>
+  filter(
+    !is.na(beds), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  mutate(beds = factor(beds)) |>
+  ggplot(aes(x = beds, y = price, fill = beds)) +
+  geom_boxplot(alpha = .75, outlier.alpha = .4, show.legend = FALSE) +
+  annotate("text", x = Inf, y = Inf,
+           label = overall_r$label,
+           hjust = 1.2, vjust = 1.5,
+           size = 4, fontface = "bold", color = "firebrick") +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Price by Number of Beds — Overall",
+       subtitle = "Price outliers removed via IQR rule | r = overall Pearson (beds continuous vs price)",
+       x = "Beds", y = "Price (€)")
+
+# by location
+df |>
+  filter(
+    !is.na(beds), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  mutate(beds = factor(beds)) |>
+  ggplot(aes(x = beds, y = price, fill = beds)) +
+  geom_boxplot(alpha = .75, outlier.alpha = .4, show.legend = FALSE) +
+  geom_text(data = location_r, aes(label = label),
+            x = -Inf, y = Inf, hjust = -0.2, vjust = 1.5,
+            size = 3.5, fontface = "bold", color = "firebrick",
+            inherit.aes = FALSE) +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  facet_wrap(~location, scales = "free_y") +
+  labs(title = "Price by Number of Beds — by Location",
+       subtitle = "Price outliers removed via IQR rule | r = Pearson per location (beds continuous vs price)",
+       x = "Beds", y = "Price (€)")
+
+
+#### bathrooms
+
+# single overall r
+overall_r <- df |>
+  filter(
+    !is.na(bathrooms), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  summarise(r = cor(bathrooms, price, use = "complete.obs")) |>
+  mutate(label = paste0("r = ", round(r, 2)))
+
+# r per location
+location_r <- df |>
+  filter(
+    !is.na(bathrooms), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  group_by(location) |>
+  summarise(r = cor(bathrooms, price, use = "complete.obs"), .groups = "drop") |>
+  mutate(label = paste0("r = ", round(r, 2)))
+
+# overall plot
+df |>
+  filter(
+    !is.na(bathrooms), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  mutate(bathrooms = factor(bathrooms)) |>
+  ggplot(aes(x = bathrooms, y = price, fill = bathrooms)) +
+  geom_boxplot(alpha = .75, outlier.alpha = .4, show.legend = FALSE) +
+  annotate("text", x = Inf, y = Inf,
+           label = overall_r$label,
+           hjust = 1.2, vjust = 1.5,
+           size = 4, fontface = "bold", color = "firebrick") +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Price by Number of bathrooms — Overall",
+       subtitle = "Price outliers removed via IQR rule | r = overall Pearson (bathrooms continuous vs price)",
+       x = "bathrooms", y = "Price (€)")
+
+# by location
+df |>
+  filter(
+    !is.na(bathrooms), !is.na(price),
+    price >= price_fences$lower_fence,
+    price <= price_fences$upper_fence
+  ) |>
+  mutate(bathrooms = factor(bathrooms)) |>
+  ggplot(aes(x = bathrooms, y = price, fill = bathrooms)) +
+  geom_boxplot(alpha = .75, outlier.alpha = .4, show.legend = FALSE) +
+  geom_text(data = location_r, aes(label = label),
+            x = -Inf, y = Inf, hjust = -0.2, vjust = 1.5,
+            size = 3.5, fontface = "bold", color = "firebrick",
+            inherit.aes = FALSE) +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  facet_wrap(~location, scales = "free_y") +
+  labs(title = "Price by Number of bathrooms — by Location",
+       subtitle = "Price outliers removed via IQR rule | r = Pearson per location (bathrooms continuous vs price)",
+       x = "bathrooms", y = "Price (€)")
+```
+
+### 4.3 Property Size (sqm) — Outlier Check
+
+```{r sqm-dist}
+#| fig-cap: "sqm distribution — checking for outliers"
+
+sqm_stats <- df |>
+  filter(!is.na(sqm)) |>
+  summarise(q1 = quantile(sqm, .25), q3 = quantile(sqm, .75)) |>
+  mutate(iqr = q3 - q1,
+         upper_fence = q3 + 1.5 * iqr,
+         lower_fence = q1 - 1.5 * iqr)
+
+p1 <- ggplot(df |> filter(!is.na(sqm)), aes(x = sqm)) +
+  geom_histogram(bins = 40, fill = "#76B7B2", color = "white", alpha = .85) +
+  geom_vline(xintercept = sqm_stats$upper_fence,
+             linetype = "dashed", color = "firebrick") +
+  annotate("text", x = sqm_stats$upper_fence + 5, y = Inf,
+           label = paste0("Upper fence: ", round(sqm_stats$upper_fence), " sqm"),
+           vjust = 2, hjust = 0, color = "firebrick", size = 3.2) +
+  labs(title = "sqm Distribution (all values)",
+       x = "Size (m²)", y = "Count")
+
+p2 <- ggplot(df |> filter(!is.na(sqm), sqm <= sqm_stats$upper_fence), aes(x = sqm)) +
+  geom_histogram(bins = 35, fill = "#76B7B2", color = "white", alpha = .85) +
+  labs(title = "sqm Distribution (outliers removed)",
+       x = "Size (m²)", y = "Count")
+
+p1 / p2
+save_fig("10_sqm_distribution")
+
+# Print suspected outliers
+df |>
+  filter(!is.na(sqm), sqm < sqm_stats$lower_fence | sqm > sqm_stats$upper_fence) |>
+  select(Villa_name, location, sqm, price) |>
+  arrange(sqm) |>
+  gt() |>
+  tab_header(title = "Suspected sqm Outliers (IQR rule)")
+```
+
+------------------------------------------------------------------------
+
+## 5 Distance
+
+```{r distance-dist}
+#| fig-cap: "Distributions of distance from centre and from beach"
+
+d1 <- ggplot(df |> filter(!is.na(distance_from_center_km)),
+             aes(x = distance_from_center_km)) +
+  geom_histogram(bins = 30, fill = "#EDC948", color = "white", alpha = .85) +
+  labs(title = "Distance from Centre", x = "km", y = "Count")
+
+d2 <- ggplot(df |> filter(!is.na(distance_from_beach_km)),
+             aes(x = distance_from_beach_km)) +
+  geom_histogram(bins = 30, fill = "#B07AA1", color = "white", alpha = .85) +
+  labs(title = "Distance from Beach", x = "km", y = "Count")
+
+d1 + d2
+save_fig("11_distance_distributions")
+```
+
+```{r distance-price}
+#| fig-cap: "Price vs distance from beach and city centre"
+
+dp1 <- ggplot(df |> filter(!is.na(distance_from_beach_km), !is.na(price)),
+              aes(x = distance_from_beach_km, y = price)) +
+  geom_point(alpha = .5, color = "#B07AA1", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "grey30", linetype = "dashed") +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Price vs Distance from Beach",
+       x = "Distance from Beach (km)", y = "Price (€)")
+
+dp2 <- ggplot(df |> filter(!is.na(distance_from_center_km), !is.na(price)),
+              aes(x = distance_from_center_km, y = price)) +
+  geom_point(alpha = .5, color = "#EDC948", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "grey30", linetype = "dashed") +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Price vs Distance from Centre",
+       x = "Distance from Centre (km)", y = "Price (€)")
+
+dp1 + dp2
+save_fig("12_distance_vs_price")
+```
+
+------------------------------------------------------------------------
+
+## 6 Discounts
+
+```{r discount-overview}
+#| fig-cap: "Share of listings with a discount and discount % distribution"
+
+disc_share <- mean(df$has_discount, na.rm = TRUE)
+
+p1 <- df |>
+  count(has_discount) |>
+  mutate(label = ifelse(has_discount, "Discounted", "Full Price"),
+         pct   = n / sum(n)) |>
+  ggplot(aes(x = "", y = pct, fill = label)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar("y") +
+  scale_fill_manual(values = c("Discounted" = "#F28E2B", "Full Price" = "#4E79A7")) +
+  geom_text(aes(label = percent(pct, accuracy = 1)),
+            position = position_stack(vjust = .5), color = "white", size = 4.5) +
+  labs(title = "Share of Discounted Listings", fill = NULL) +
+  theme_void(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", hjust = .5))
+
+p2 <- ggplot(df |> filter(!is.na(discount_pct)), aes(x = discount_pct)) +
+  geom_histogram(bins = 30, fill = "#F28E2B", color = "white", alpha = .85) +
+  labs(title = "Discount % Distribution",
+       x = "Discount (%)", y = "Count")
+
+p1 + p2
+save_fig("13_discount_overview")
+```
+
+```{r discount-price}
+#| fig-cap: "Original vs final price coloured by discount status"
+
+ggplot(df |> filter(!is.na(price)),
+       aes(x = price, fill = has_discount)) +
+  geom_density(alpha = .5) +
+  scale_x_continuous(labels = label_dollar(prefix = "€")) +
+  scale_fill_manual(values = c("FALSE" = "#4E79A7", "TRUE" = "#F28E2B"),
+                    labels = c("Full Price", "Discounted")) +
+  labs(title = "Price Density: Discounted vs Full Price",
+       x = "Price (€)", y = "Density", fill = NULL)
+
+save_fig("14_price_density_discount")
+```
+
+------------------------------------------------------------------------
+
+## 7 Correlations
+
+```{r correlation}
+#| fig-cap: "Pearson correlation matrix for all numeric variables"
+#| fig-height: 7
+
+num_vars <- df |>
+  select(price, rating, comfort_rate, bedrooms, bathrooms, beds, sqm,
+         distance_from_center_km, distance_from_beach_km, discount_pct) |>
+  rename(
+    `Price`           = price,
+    `Rating`          = rating,
+    `Comfort`         = comfort_rate,
+    `Bedrooms`        = bedrooms,
+    `Bathrooms`       = bathrooms,
+    `Beds`            = beds,
+    `Size (m²)`       = sqm,
+    `Dist. Centre`    = distance_from_center_km,
+    `Dist. Beach`     = distance_from_beach_km,
+    `Discount %`      = discount_pct
+  )
+
+cor_mat <- cor(num_vars, use = "pairwise.complete.obs")
+
+ggcorrplot(cor_mat,
+           method   = "circle",
+           type     = "lower",
+           lab      = TRUE,
+           lab_size = 3,
+           colors   = c("#E15759", "white", "#4E79A7"),
+           title    = "Correlation Matrix — Numeric Variables",
+           ggtheme  = theme_erato())
+
+save_fig("15_correlation_matrix", width = 9, height = 7)
+
+# ── clean data ─────────────────────────────────────────────────────────────────
+df_clean <- df |>
+  filter(price >= price_fences$lower_fence,
+         price <= price_fences$upper_fence)
+
+# ── helper ─────────────────────────────────────────────────────────────────────
+plot_cor <- function(data, title) {
+  tryCatch({
+    data |>
+      select(Price = price, Rating = rating, Comfort = comfort_rate,
+             Bedrooms = bedrooms, Bathrooms = bathrooms, Beds = beds,
+             `Size (m²)` = sqm, `Dist. Centre` = distance_from_center_km,
+             `Dist. Beach` = distance_from_beach_km, `Discount %` = discount_pct) |>
+      cor(use = "pairwise.complete.obs") |>
+      ggcorrplot(method   = "circle",
+                 type     = "lower",
+                 lab      = TRUE,
+                 lab_size = 2.5,
+                 colors   = c("#E15759", "white", "#4E79A7"),
+                 title    = title,
+                 ggtheme  = theme_erato()) |>
+      print()
+  }, error = function(e) {
+    message("Skipping '", title, "' — ", e$message)
+  })
+}
+# ── 1. Overall ─────────────────────────────────────────────────────────────────
+plot_cor(df_clean, "Correlation Matrix — Overall")
+
+# ── 2. By location ─────────────────────────────────────────────────────────────
+df_clean |>
+  split(~location) |>
+  iwalk(~ plot_cor(.x, paste0("Correlation — ", .y)))
+
+# ── 3. By location × month (Jun, Aug, Oct) ─────────────────────────────────────
+df_clean |>
+  filter(month %in% c("jun", "aug", "oct")) |>
+  mutate(group = paste0(location, " — ", month)) |>
+  split(~group) |>
+  iwalk(~ plot_cor(.x, paste0("Correlation — ", .y)))
+
+```
+
+------------------------------------------------------------------------
+
+```{r}
+df_clean |>
+  filter(!is.na(price)) |>
+  group_by(location) |>
+  summarise(
+    median_price  = median(price),
+    sd_price      = sd(price),
+    cv            = median_price / sd_price,
+    downside_risk = median_price - quantile(price, .25),
+    n             = n(),
+    .groups = "drop"
+  ) |>
+  mutate(location = fct_reorder(location, median_price)) |>
+  pivot_longer(cols = c(median_price, sd_price, cv, downside_risk),
+               names_to = "metric", values_to = "value") |>
+  mutate(metric = factor(metric,
+                         levels = c("median_price", "sd_price", "cv", "downside_risk"),
+                         labels = c("Median Price (€)", "SD Price (€)",
+                                    "Median / SD", "Downside Risk (Median - Q25)"))) |>
+  ggplot(aes(x = location, y = value, fill = location)) +
+  geom_col(alpha = .8, show.legend = FALSE) +
+  facet_wrap(~metric, scales = "free_y", ncol = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Price Spread & Risk by Location",
+       subtitle = "Median, SD, Median/SD, and Downside Risk | IQR outliers removed",
+       x = NULL, y = NULL)
+
+library(ggridges)
+
+df_clean |>
+  filter(!is.na(price), !is.na(month)) |>
+  mutate(location = fct_reorder(location, price, median)) |>
+  ggplot(aes(x = price, y = location, fill = month)) +
+  geom_density_ridges(alpha = .6, scale = 1.2, rel_min_height = 0.01) +
+  scale_x_continuous(labels = label_dollar(prefix = "€")) +
+  scale_fill_viridis_d(option = "C") +
+  facet_wrap(~month, ncol = 3) +
+  labs(title = "Price Distribution by Location × Month",
+       subtitle = "IQR outliers removed | each panel = one month",
+       x = "Price (€)", y = NULL) +
+  theme(legend.position = "none")
+```
+
+```{r}
+
+
+
+
+df_clean <- df |>
+  dplyr::filter(price >= price_fences$lower_fence,
+                price <= price_fences$upper_fence)
+# ── 1. Missingness % per location ─────────────────────────────────────────────
+df |>
+  dplyr::group_by(location) |>
+  dplyr::summarise(
+    `Dist. Beach`  = mean(is.na(distance_from_beach_km)) * 100,
+    `Dist. Centre` = mean(is.na(distance_from_center_km)) * 100,
+    .groups = "drop"
+  ) |>
+  pivot_longer(cols = c(`Dist. Beach`, `Dist. Centre`),
+               names_to = "variable", values_to = "pct_missing") |>
+  mutate(location = fct_reorder(location, pct_missing, max)) |>
+  ggplot(aes(x = location, y = pct_missing, fill = variable)) +
+  geom_col(position = "dodge", alpha = .8) +
+  geom_text(aes(label = paste0(round(pct_missing), "%")),
+            position = position_dodge(width = .9),
+            vjust = -.4, size = 3) +
+  scale_fill_manual(values = c("#4E79A7", "#F28E2B")) +
+  labs(title = "% Missing — Distance Variables by Location",
+       x = NULL, y = "% Missing", fill = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# ── Pearson r per month ────────────────────────────────────────────────────────
+r_beach <- df_clean |>
+  dplyr::filter(!is.na(price), !is.na(distance_from_beach_km), !is.na(month)) |>
+  dplyr::group_by(month) |>
+  dplyr::summarise(r = cor(distance_from_beach_km, price, use = "complete.obs"),
+                   .groups = "drop") |>
+  mutate(label = paste0("r = ", round(r, 2)))
+
+r_centre <- df_clean |>
+  dplyr::filter(!is.na(price), !is.na(distance_from_center_km), !is.na(month)) |>
+  dplyr::group_by(month) |>
+  dplyr::summarise(r = cor(distance_from_center_km, price, use = "complete.obs"),
+                   .groups = "drop") |>
+  mutate(label = paste0("r = ", round(r, 2)))
+
+# ── Price vs Distance from Beach by Month ─────────────────────────────────────
+df_clean |>
+  dplyr::filter(!is.na(price), !is.na(distance_from_beach_km), !is.na(month)) |>
+  ggplot(aes(x = distance_from_beach_km, y = price, color = location)) +
+  geom_point(alpha = .5, size = 1.5) +
+  geom_smooth(aes(group = 1), method = "lm", se = TRUE,
+              color = "grey30", linewidth = .8, linetype = "dashed") +
+  geom_text(data = r_beach, aes(label = label),
+            x = -Inf, y = Inf, hjust = -0.2, vjust = 1.5,
+            size = 3.5, fontface = "bold", color = "firebrick",
+            inherit.aes = FALSE) +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  facet_wrap(~month, scales = "free_y", ncol = 3) +
+  labs(title = "Price vs Distance from Beach — By Month",
+       subtitle = "IQR outliers removed | dashed = linear trend | r = Pearson per month",
+       x = "Distance from Beach (km)", y = "Price (€)", color = "Location") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# ── Seasonal drop: Aug vs Oct ──────────────────────────────────────────────────
+aug_oct_beach <- df_clean |>
+  dplyr::filter(!is.na(price), !is.na(distance_from_beach_km),
+                month %in% c("aug", "oct")) |>
+  dplyr::group_by(location, month) |>
+  dplyr::summarise(median_price = median(price), .groups = "drop") |>
+  pivot_wider(names_from = month, values_from = median_price,
+              names_prefix = "price_") |>
+  left_join(
+    df_clean |>
+      dplyr::filter(!is.na(distance_from_beach_km)) |>
+      dplyr::group_by(location) |>
+      dplyr::summarise(median_beach_dist = median(distance_from_beach_km),
+                       .groups = "drop"),
+    by = "location"
+  ) |>
+  mutate(
+    aug_oct_diff = price_aug - price_oct,
+    label        = paste0(location, "\n€", comma(round(aug_oct_diff)))
+  ) |>
+  dplyr::filter(!is.na(aug_oct_diff), !is.na(median_beach_dist))
+
+r_val <- cor(aug_oct_beach$median_beach_dist,
+             aug_oct_beach$aug_oct_diff,
+             use = "complete.obs")
+
+ggplot(aug_oct_beach, aes(x = median_beach_dist, y = aug_oct_diff, color = location)) +
+  geom_point(size = 4, alpha = .8) +
+  geom_text(aes(label = label), vjust = -0.8, size = 3, show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_smooth(aes(group = 1), method = "lm", se = TRUE,
+              color = "grey30", linewidth = .8, linetype = "dashed") +
+  annotate("text", x = -Inf, y = Inf,
+           label = paste0("r = ", round(r_val, 2)),
+           hjust = -0.2, vjust = 1.5,
+           size = 4, fontface = "bold", color = "firebrick") +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Seasonal Price Drop (Aug − Oct) vs Distance from Beach",
+       subtitle = "Each point = one location | positive = higher price in Aug than Oct",
+       x = "Median Distance from Beach (km)",
+       y = "Median Price Aug − Oct (€)",
+       color = "Location")
+
+
+```
+
+## 8 Descriptive Statistics Table
+
+```{r descriptives-table}
+desc_table <- df |>
+  select(price, rating, comfort_rate, bedrooms, bathrooms, beds, sqm,
+         distance_from_center_km, distance_from_beach_km, discount_pct) |>
+  pivot_longer(everything(), names_to = "Variable") |>
+  group_by(Variable) |>
+  summarise(
+    N       = sum(!is.na(value)),
+    Missing = sum(is.na(value)),
+    Mean    = mean(value, na.rm = TRUE),
+    SD      = sd(value, na.rm = TRUE),
+    Min     = min(value, na.rm = TRUE),
+    Q25     = quantile(value, .25, na.rm = TRUE),
+    Median  = median(value, na.rm = TRUE),
+    Q75     = quantile(value, .75, na.rm = TRUE),
+    Max     = max(value, na.rm = TRUE)
+  )
+
+desc_table |>
+  gt() |>
+  tab_header(title = "Descriptive Statistics — Numeric Variables") |>
+  fmt_number(columns = where(is.numeric), decimals = 2) |>
+  tab_style(
+    style     = cell_fill(color = "#f5f5f5"),
+    locations = cells_body(rows = seq(2, nrow(desc_table), 2))
+  )
+```
+
+------------------------------------------------------------------------
+
+# Analyses
+
+## location and month random
+
+### Frequenctic
+
+```{r}
+# ── Frequentist multilevel model for villa prices ─────────────────────────────
+
+if ("package:conflicted" %in% search()) {
+  detach("package:conflicted", unload = TRUE, character.only = TRUE)
+}
+
+
+# ── 1. Preprocessing function ─────────────────────────────────────────────────
+prepare_data <- function(data) {
+  data |>
+    dplyr::filter(
+      !is.na(price),
+      !is.na(bedrooms),
+      !is.na(bathrooms),
+      !is.na(beds),
+      !is.na(sqm),
+      !is.na(rating),
+      !is.na(month),
+      !is.na(location)
+    ) |>
+    dplyr::mutate(
+      log_price   = log(price),
+      bedrooms_z  = as.numeric(scale(bedrooms)),
+      bathrooms_z = as.numeric(scale(bathrooms)),
+      beds_z      = as.numeric(scale(beds)),
+      sqm_z       = as.numeric(scale(sqm)),
+      rating_z    = as.numeric(scale(rating)),
+      month       = forcats::fct_drop(month),
+      location    = forcats::fct_drop(as.factor(location))
+    )
+}
+
+df_model_full  <- prepare_data(df)
+df_model_clean <- prepare_data(df_clean)
+
+# make dir one level up to avoid issues with saving results
+if (!dir.exists(here::here("../Results"))) {
+  dir.create(here::here("../Results"), recursive = TRUE)
+}
+
+# ── 2. Fit Model 1 — with outliers ────────────────────────────────────────────
+m1_full <- lmerTest::lmer(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month | location),
+  data    = df_model_full,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+# ── 3. Fit Model 2 — without outliers ─────────────────────────────────────────
+m2_clean <- lmerTest::lmer(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month | location),
+  data    = df_model_clean,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+# ── 4. Quick summaries ────────────────────────────────────────────────────────
+summary(m1_full)
+summary(m2_clean)
+
+# optional p-values for fixed effects
+anova(m1_full)
+anova(m2_clean)
+
+# ── 5. Diagnostics ────────────────────────────────────────────────────────────
+performance::check_model(m1_full)
+performance::check_model(m2_clean)
+
+performance::r2(m1_full)
+performance::r2(m2_clean)
+
+isSingular(m1_full, tol = 1e-4)
+isSingular(m2_clean, tol = 1e-4)
+
+# ── 6. Save model objects ─────────────────────────────────────────────────────
+saveRDS(m1_full, here::here("../Results", "m1_full_lmer.rds"))
+saveRDS(m2_clean, here::here("../Results", "m2_clean_lmer.rds"))
+
+# ── 7. Compare models if needed ───────────────────────────────────────────────
+AIC(m1_full, m2_clean)
+BIC(m1_full, m2_clean)
+
+# ── 8. Simple residual plots ──────────────────────────────────────────────────
+par(mfrow = c(2, 2))
+plot(m1_full)
+plot(m2_clean)
+qqnorm(resid(m1_full)); qqline(resid(m1_full))
+qqnorm(resid(m2_clean)); qqline(resid(m2_clean))
+par(mfrow = c(1, 1))
+```
+
+### interpretation
+
+In the cleaned dataset, a linear mixed-effects model predicting log
+price with random intercepts for location showed that bedrooms,
+bathrooms, surface area, and rating were positively associated with
+price, whereas the coefficient for number of beds was negative after
+adjustment for the other structural variables. October listings were
+priced lower than the reference month. The model explained a substantial
+proportion of the variance, with location contributing importantly
+beyond the fixed effects. In contrast, the corresponding model on the
+full dataset showed a singular fit, suggesting that the more complex
+random-effects structure was not fully supported when outliers were
+retained.
+
+## only location random
+
+```{r}
+# ── Simple frequentist mixed model on the cleaned dataset + comparison ────────
+
+
+# ── 1. Prepare cleaned modeling data ──────────────────────────────────────────
+prepare_data <- function(data) {
+  data |>
+    dplyr::filter(
+      !is.na(price),
+      !is.na(bedrooms),
+      !is.na(bathrooms),
+      !is.na(beds),
+      !is.na(sqm),
+      !is.na(rating),
+      !is.na(month),
+      !is.na(location)
+    ) |>
+    dplyr::mutate(
+      log_price   = log(price),
+      bedrooms_z  = as.numeric(scale(bedrooms)),
+      bathrooms_z = as.numeric(scale(bathrooms)),
+      beds_z      = as.numeric(scale(beds)),
+      sqm_z       = as.numeric(scale(sqm)),
+      rating_z    = as.numeric(scale(rating)),
+      month       = forcats::fct_drop(month),
+      location    = forcats::fct_drop(as.factor(location))
+    )
+}
+
+df_model_clean <- prepare_data(df_clean)
+
+# ── 2. Fit simple clean model: random intercept only for location ─────────────
+m_clean_simple <- lmerTest::lmer(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 | location),
+  data    = df_model_clean,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+# ── 3. Inspect simple model ───────────────────────────────────────────────────
+summary(m_clean_simple)
+anova(m_clean_simple)
+
+# ── 4. Diagnostics ────────────────────────────────────────────────────────────
+isSingular(m_clean_simple, tol = 1e-4)
+performance::r2(m_clean_simple)
+performance::check_model(m_clean_simple)
+
+# ── 5. Compare with previous random-slope clean model if it exists ────────────
+if (exists("m2_clean")) {
+  cat("\n==============================\n")
+  cat("Model comparison on same data\n")
+  cat("==============================\n\n")
+  
+  print(AIC(m_clean_simple, m2_clean))
+  print(BIC(m_clean_simple, m2_clean))
+  cat("\nLikelihood ratio test:\n")
+  print(anova(m_clean_simple, m2_clean))
+  
+  cat("\nSingularity check:\n")
+  cat("m_clean_simple:", isSingular(m_clean_simple, tol = 1e-4), "\n")
+  cat("m2_clean      :", isSingular(m2_clean, tol = 1e-4), "\n")
+  
+  cat("\nR2:\n")
+  print(performance::r2(m_clean_simple))
+  print(performance::r2(m2_clean))
+}
+
+# ── 6. Save simple clean model ────────────────────────────────────────────────
+if (!dir.exists(here::here("../Results"))) {
+  dir.create(here::here("../Results"), recursive = TRUE)
+}
+
+saveRDS(m_clean_simple, here::here("../Results", "m_clean_simple_lmer.rds"))
+
+# ── 7. Basic residual plots ───────────────────────────────────────────────────
+par(mfrow = c(1, 2))
+plot(m_clean_simple)
+qqnorm(resid(m_clean_simple))
+qqline(resid(m_clean_simple))
+par(mfrow = c(1, 1))
+```
+
+### Interpretation
+
+In the cleaned dataset, a mixed-effects model with random intercepts and
+random slopes of month by location provided a significantly better fit
+than a simpler random-intercept-only model, 𝜒 2 ( 2 ) = 56.82 , 𝑝 \<
+.001 χ 2 (2)=56.82,p\<.001. This indicates that the association between
+month and price varied across locations. Therefore, the random-slope
+model was retained for inference.
+
+And then for the substantive results:
+
+In the retained model, bedrooms, bathrooms, surface area, and rating
+were positively associated with log price, whereas the number of beds
+showed a negative adjusted association. Listings in October were cheaper
+than those in the reference month.
+
+# Write ups
+
+In the cleaned dataset, we fitted a linear mixed-effects model
+predicting log-transformed price from standardized bedrooms, bathrooms,
+beds, surface area, rating, and month, with random intercepts and random
+slopes for month across locations. This model was preferred over a
+simpler random-intercept-only model, as it showed better fit according
+to the likelihood ratio test, χ2(2)=56.82\chi^2(2) = 56.82χ2(2)=56.82,
+p<.001p < .001p\<.001, as well as lower AIC and BIC values. The retained
+model was well-behaved and did not show singularity. Within this model,
+higher numbers of bedrooms (β=0.135\beta = 0.135β=0.135,
+p<.001p < .001p\<.001), bathrooms (β=0.166\beta = 0.166β=0.166,
+p<.001p < .001p\<.001), larger surface area
+(β=0.038\beta = 0.038β=0.038, p<.001p < .001p\<.001), and higher ratings
+(β=0.066\beta = 0.066β=0.066, p<.001p < .001p\<.001) were associated
+with higher prices. In contrast, the number of beds showed a negative
+adjusted association with price (β=−0.068\beta = -0.068β=−0.068,
+p<.001p < .001p\<.001). There was also a significant effect of month,
+with listings in October being cheaper than those in the reference month
+(β=−0.442\beta = -0.442β=−0.442, p<.001p < .001p\<.001). The model
+explained a substantial proportion of the variance in price (marginal
+R2=0.341R^2 = 0.341R2=0.341; conditional R2=0.580R^2 = 0.580R2=0.580),
+indicating that both villa characteristics and between-location
+variability contributed importantly to pricing.
+
+# Interactions
+
+```{r}
+# ── Test whether predictor effects vary across locations ──────────────────────
+
+
+
+# Base model already selected
+m_base <- m2_clean
+
+# ── 1. Candidate models: add one random slope at a time ──────────────────────
+m_loc_rating <- lmerTest::lmer(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + rating_z || location),
+  data    = df_model_clean,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+m_loc_sqm <- lmerTest::lmer(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + sqm_z || location),
+  data    = df_model_clean,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+m_loc_bedrooms <- lmerTest::lmer(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + bedrooms_z || location),
+  data    = df_model_clean,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+m_loc_bathrooms <- lmerTest::lmer(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + bathrooms_z || location),
+  data    = df_model_clean,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+# ── 2. Compare each to the base model ─────────────────────────────────────────
+cat("\n--- rating slope varies by location ---\n")
+print(anova(m_base, m_loc_rating))
+cat("Singular:", isSingular(m_loc_rating, tol = 1e-4), "\n")
+print(AIC(m_base, m_loc_rating))
+
+cat("\n--- sqm slope varies by location ---\n")
+print(anova(m_base, m_loc_sqm))
+cat("Singular:", isSingular(m_loc_sqm, tol = 1e-4), "\n")
+print(AIC(m_base, m_loc_sqm))
+
+cat("\n--- bedrooms slope varies by location ---\n")
+print(anova(m_base, m_loc_bedrooms))
+cat("Singular:", isSingular(m_loc_bedrooms, tol = 1e-4), "\n")
+print(AIC(m_base, m_loc_bedrooms))
+
+cat("\n--- bathrooms slope varies by location ---\n")
+print(anova(m_base, m_loc_bathrooms))
+cat("Singular:", isSingular(m_loc_bathrooms, tol = 1e-4), "\n")
+print(AIC(m_base, m_loc_bathrooms))
+
+# ── 3. Inspect whichever model wins ───────────────────────────────────────────
+summary(m_loc_rating)
+performance::r2(m_loc_rating)
+performance::check_model(m_loc_rating)
+```
+
+```{r}
+# ── Next step: keep sqm varying by location, then test added slopes ───────────
+
+
+
+# ── 1. Main candidate model: location-specific sqm effect ─────────────────────
+m_loc_sqm <- lmerTest::lmer(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + sqm_z || location),
+  data    = df_model_clean,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+summary(m_loc_sqm)
+anova(m_loc_sqm)
+isSingular(m_loc_sqm, tol = 1e-4)
+performance::r2(m_loc_sqm)
+performance::check_model(m_loc_sqm)
+
+# ── 2. Test whether rating also varies by location beyond sqm ─────────────────
+m_loc_sqm_rating <- lmerTest::lmer(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + sqm_z + rating_z || location),
+  data    = df_model_clean,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+# ── 3. Test whether bedrooms also vary by location beyond sqm ─────────────────
+m_loc_sqm_bedrooms <- lmerTest::lmer(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + sqm_z + bedrooms_z || location),
+  data    = df_model_clean,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+# ── 4. Compare added models to sqm-only varying slope model ───────────────────
+cat("\n--- Add rating slope on top of sqm slope ---\n")
+print(anova(m_loc_sqm, m_loc_sqm_rating))
+cat("Singular:", isSingular(m_loc_sqm_rating, tol = 1e-4), "\n")
+print(AIC(m_loc_sqm, m_loc_sqm_rating))
+print(BIC(m_loc_sqm, m_loc_sqm_rating))
+
+cat("\n--- Add bedrooms slope on top of sqm slope ---\n")
+print(anova(m_loc_sqm, m_loc_sqm_bedrooms))
+cat("Singular:", isSingular(m_loc_sqm_bedrooms, tol = 1e-4), "\n")
+print(AIC(m_loc_sqm, m_loc_sqm_bedrooms))
+print(BIC(m_loc_sqm, m_loc_sqm_bedrooms))
+
+# ── 5. Save the best-supported model ──────────────────────────────────────────
+saveRDS(m_loc_sqm, here::here("../Results", "m_loc_sqm_lmer.rds"))
+```
+```{r}
+summary(m_loc_sqm)
+summary(m_loc_sqm_rating)
+
+performance::r2(m_loc_sqm)
+performance::r2(m_loc_sqm_rating)
+
+performance::check_model(m_loc_sqm)
+performance::check_model(m_loc_sqm_rating)
+
+isSingular(m_loc_sqm, tol = 1e-4)
+isSingular(m_loc_sqm_rating, tol = 1e-4)
+
+VarCorr(m_loc_sqm)
+VarCorr(m_loc_sqm_rating)
+
+ranef(m_loc_sqm_rating)
+```
+# interpretations
+
+In the cleaned dataset, we extended the mixed-effects model by allowing selected predictor effects to vary across locations. The strongest evidence for location-specific heterogeneity concerned surface area: a model allowing the effect of sqm to vary by location fit significantly better than the baseline random-slope model, 
+𝜒
+2
+(
+2
+)
+=
+35.28
+χ
+2
+(2)=35.28, 
+𝑝
+<
+.001
+p<.001, without signs of singularity. This indicates that the association between villa size and price was not constant across destinations. Adding a location-specific effect of rating provided a further improvement in fit, 
+𝜒
+2
+(
+1
+)
+=
+6.93
+χ
+2
+(1)=6.93, 
+𝑝
+=
+.008
+p=.008, but this effect was smaller, the estimated variance of the rating slope was modest, and the model showed signs of near-unidentifiability. By contrast, allowing the effect of bedrooms to vary across locations did not provide clear additional benefit beyond the sqm-varying model, and no evidence supported location-specific variation in the bathrooms effect. Overall, the results suggest that destination-specific pricing differences are driven primarily by variation in how surface area translates into price, with more limited evidence for variation in the contribution of ratings.
+
+
+
+```{r}
+# ── Dive into location interactions ───────────────────────────────────────────
+
+
+library(emmeans)
+library(broom)
+
+# ============================================================================
+# 1. Extract location-specific slopes from the mixed model
+#    Use the extended exploratory model if available, otherwise use m_loc_sqm
+# ============================================================================
+
+model_for_slopes <- m_loc_sqm_rating   # or m_loc_sqm if you want the simpler one
+
+fe <- fixef(model_for_slopes)
+re <- ranef(model_for_slopes)$location
+
+location_slopes <- tibble(
+  location      = rownames(re),
+  intercept     = fe["(Intercept)"] + re[, "(Intercept)"],
+  sqm_slope     = fe["sqm_z"]       + re[, "sqm_z"],
+  rating_slope  = fe["rating_z"]    + re[, "rating_z"],
+  monthoct_eff  = fe["monthoct"]    + re[, "monthoct"]
+) |>
+  arrange(desc(sqm_slope))
+
+print(location_slopes)
+
+# --- Plot location-specific sqm slopes
+ggplot(location_slopes, aes(x = reorder(location, sqm_slope), y = sqm_slope)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Location-specific slope of sqm on log price",
+    x = "Location",
+    y = "Estimated sqm slope"
+  )
+
+# --- Plot location-specific rating slopes
+ggplot(location_slopes, aes(x = reorder(location, rating_slope), y = rating_slope)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Location-specific slope of rating on log price",
+    x = "Location",
+    y = "Estimated rating slope"
+  )
+
+# ============================================================================
+# 2. Explicit fixed interaction model: sqm × location
+#    This is for interpretation/testing, not the main mixed model
+#    Do NOT include (1 | location) here, because location is treated as fixed
+# ============================================================================
+
+m_fx_sqm_base <- lm(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month + location,
+  data = df_model_clean
+)
+
+m_fx_sqm_int <- lm(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z * location + rating_z + month,
+  data = df_model_clean
+)
+
+cat("\n==============================\n")
+cat("Fixed interaction: sqm × location\n")
+cat("==============================\n\n")
+
+print(anova(m_fx_sqm_base, m_fx_sqm_int))
+summary(m_fx_sqm_int)
+
+# Estimated sqm slope within each location
+sqm_trends <- emtrends(m_fx_sqm_int, specs = "location", var = "sqm_z")
+print(sqm_trends)
+
+# Pairwise comparisons of sqm slopes across locations
+sqm_pairs <- pairs(sqm_trends, adjust = "holm")
+print(sqm_pairs)
+
+# Plot estimated sqm slopes by location
+sqm_trends_df <- as.data.frame(sqm_trends)
+
+ggplot(sqm_trends_df, aes(x = reorder(location, sqm_z.trend), y = sqm_z.trend)) +
+  geom_col() +
+  geom_errorbar(
+    aes(ymin = lower.CL, ymax = upper.CL),
+    width = 0.2
+  ) +
+  coord_flip() +
+  labs(
+    title = "Estimated sqm slope by location (fixed interaction model)",
+    x = "Location",
+    y = "Slope of sqm_z"
+  )
+
+# ============================================================================
+# 3. Optional exploratory fixed interaction: rating × location
+# ============================================================================
+
+m_fx_rating_base <- lm(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z + month + location,
+  data = df_model_clean
+)
+
+m_fx_rating_int <- lm(
+  log_price ~ bedrooms_z + bathrooms_z + beds_z + sqm_z + rating_z * location + month,
+  data = df_model_clean
+)
+
+cat("\n==============================\n")
+cat("Fixed interaction: rating × location\n")
+cat("==============================\n\n")
+
+print(anova(m_fx_rating_base, m_fx_rating_int))
+summary(m_fx_rating_int)
+
+rating_trends <- emtrends(m_fx_rating_int, specs = "location", var = "rating_z")
+print(rating_trends)
+
+rating_pairs <- pairs(rating_trends, adjust = "holm")
+print(rating_pairs)
+
+rating_trends_df <- as.data.frame(rating_trends)
+
+ggplot(rating_trends_df, aes(x = reorder(location, rating_z.trend), y = rating_z.trend)) +
+  geom_col() +
+  geom_errorbar(
+    aes(ymin = lower.CL, ymax = upper.CL),
+    width = 0.2
+  ) +
+  coord_flip() +
+  labs(
+    title = "Estimated rating slope by location (fixed interaction model)",
+    x = "Location",
+    y = "Slope of rating_z"
+  )
+```
+
+# Problem with missing bedrooms
+
+```{r}
+df_clean %>%
+  group_by(location) %>%
+  summarise(
+    n_total = n(),
+    n_complete = sum(
+      !is.na(price) &
+      !is.na(bedrooms) &
+      !is.na(bathrooms) &
+      !is.na(beds) &
+      !is.na(sqm) &
+      !is.na(rating) &
+      !is.na(month) &
+      !is.na(location)
+    ),
+    miss_price = sum(is.na(price)),
+    miss_bedrooms = sum(is.na(bedrooms)),
+    miss_bathrooms = sum(is.na(bathrooms)),
+    miss_beds = sum(is.na(beds)),
+    miss_sqm = sum(is.na(sqm)),
+    miss_rating = sum(is.na(rating)),
+    miss_month = sum(is.na(month))
+  ) %>%
+  arrange(n_complete, location)
+```
+
+## location no bedrooms
+
+```{r}
+# ── Same workflow without bedrooms ─────────────────────────────────────────────
+# Goal:
+# 1) recover locations lost because bedrooms was missing
+# 2) test whether sqm / rating / beds / bathrooms vary by location
+# 3) optionally test whether rating still helps after sqm
+
+detach("package:conflicted", unload = TRUE, character.only = TRUE)
+
+
+
+# ── 0. User setting: minimum complete cases per location ──────────────────────
+MIN_N_PER_LOCATION <- 20
+
+# ── 1. Prepare data without bedrooms ──────────────────────────────────────────
+prepare_data_no_bedrooms <- function(data) {
+  data |>
+    dplyr::filter(
+      !is.na(price),
+      !is.na(bathrooms),
+      !is.na(beds),
+      !is.na(sqm),
+      !is.na(rating),
+      !is.na(month),
+      !is.na(location)
+    ) |>
+    dplyr::mutate(
+      log_price   = log(price),
+      bathrooms_z = as.numeric(scale(bathrooms)),
+      beds_z      = as.numeric(scale(beds)),
+      sqm_z       = as.numeric(scale(sqm)),
+      rating_z    = as.numeric(scale(rating)),
+      month       = forcats::fct_drop(month),
+      location    = forcats::fct_drop(as.factor(location))
+    )
+}
+
+df_model_no_bedrooms <- prepare_data_no_bedrooms(df_clean)
+
+# ── 2. Count usable rows per location and keep only reasonably supported ones ─
+location_counts_no_bedrooms <- df_model_no_bedrooms |>
+  count(location, name = "n_complete") |>
+  arrange(desc(n_complete))
+
+print(location_counts_no_bedrooms)
+
+valid_locations <- location_counts_no_bedrooms |>
+  filter(n_complete >= MIN_N_PER_LOCATION) |>
+  pull(location)
+
+df_model_no_bedrooms_min <- df_model_no_bedrooms |>
+  filter(location %in% valid_locations) |>
+  droplevels()
+
+cat("\nLocations retained (n >=", MIN_N_PER_LOCATION, "):\n")
+print(df_model_no_bedrooms_min |> count(location, sort = TRUE))
+
+# ── 3. Base model: month varies by location ───────────────────────────────────
+m_nb_base <- lmerTest::lmer(
+  log_price ~ bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month | location),
+  data    = df_model_no_bedrooms_min,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+cat("\n==============================\n")
+cat("Base model (no bedrooms)\n")
+cat("==============================\n\n")
+print(summary(m_nb_base))
+print(anova(m_nb_base))
+cat("Singular:", isSingular(m_nb_base, tol = 1e-4), "\n")
+print(performance::r2(m_nb_base))
+
+# ── 4. Test one location-varying slope at a time ──────────────────────────────
+m_nb_loc_sqm <- lmerTest::lmer(
+  log_price ~ bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + sqm_z || location),
+  data    = df_model_no_bedrooms_min,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+m_nb_loc_rating <- lmerTest::lmer(
+  log_price ~ bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + rating_z || location),
+  data    = df_model_no_bedrooms_min,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+m_nb_loc_beds <- lmer(
+  log_price ~ bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + beds_z || location),
+  data    = df_model_no_bedrooms_min,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+m_nb_loc_bathrooms <- lmerTest::lmer(
+  log_price ~ bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + bathrooms_z || location),
+  data    = df_model_no_bedrooms_min,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+cat("\n--- sqm slope varies by location ---\n")
+print(anova(m_nb_base, m_nb_loc_sqm))
+cat("Singular:", isSingular(m_nb_loc_sqm, tol = 1e-4), "\n")
+print(AIC(m_nb_base, m_nb_loc_sqm))
+print(BIC(m_nb_base, m_nb_loc_sqm))
+
+cat("\n--- rating slope varies by location ---\n")
+print(anova(m_nb_base, m_nb_loc_rating))
+cat("Singular:", isSingular(m_nb_loc_rating, tol = 1e-4), "\n")
+print(AIC(m_nb_base, m_nb_loc_rating))
+print(BIC(m_nb_base, m_nb_loc_rating))
+
+cat("\n--- beds slope varies by location ---\n")
+print(anova(m_nb_base, m_nb_loc_beds))
+cat("Singular:", isSingular(m_nb_loc_beds, tol = 1e-4), "\n")
+print(AIC(m_nb_base, m_nb_loc_beds))
+print(BIC(m_nb_base, m_nb_loc_beds))
+
+cat("\n--- bathrooms slope varies by location ---\n")
+print(anova(m_nb_base, m_nb_loc_bathrooms))
+cat("Singular:", isSingular(m_nb_loc_bathrooms, tol = 1e-4), "\n")
+print(AIC(m_nb_base, m_nb_loc_bathrooms))
+print(BIC(m_nb_base, m_nb_loc_bathrooms))
+
+# ── 5. If sqm is strongest again, test whether rating adds anything on top ───
+m_nb_loc_sqm_rating <- lmerTest::lmer(
+  log_price ~ bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month + sqm_z + rating_z || location),
+  data    = df_model_no_bedrooms_min,
+  REML    = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+
+cat("\n--- Add rating slope on top of sqm slope ---\n")
+print(anova(m_nb_loc_sqm, m_nb_loc_sqm_rating))
+cat("Singular:", isSingular(m_nb_loc_sqm_rating, tol = 1e-4), "\n")
+print(AIC(m_nb_loc_sqm, m_nb_loc_sqm_rating))
+print(BIC(m_nb_loc_sqm, m_nb_loc_sqm_rating))
+
+# ── 6. Inspect the two key candidates ─────────────────────────────────────────
+cat("\n==============================\n")
+cat("sqm-varying model\n")
+cat("==============================\n\n")
+print(summary(m_nb_loc_sqm))
+print(performance::r2(m_nb_loc_sqm))
+
+cat("\n==============================\n")
+cat("sqm + rating varying model\n")
+cat("==============================\n\n")
+print(summary(m_nb_loc_sqm_rating))
+print(performance::r2(m_nb_loc_sqm_rating))
+
+# ── 7. Extract location-specific slopes from the richer model ─────────────────
+fe <- fixef(m_nb_loc_sqm_rating)
+re <- ranef(m_nb_loc_sqm_rating)$location
+
+location_slopes_nb <- tibble(
+  location     = rownames(re),
+  intercept    = fe["(Intercept)"] + re[, "(Intercept)"],
+  sqm_slope    = fe["sqm_z"]       + re[, "sqm_z"],
+  rating_slope = fe["rating_z"]    + re[, "rating_z"],
+  monthoct_eff = fe["monthoct"]    + re[, "monthoct"]
+) |>
+  arrange(desc(sqm_slope))
+
+cat("\nLocation-specific slopes (no bedrooms model):\n")
+print(location_slopes_nb)
+
+# ── 8. Save model objects ─────────────────────────────────────────────────────
+if (!dir.exists(here::here("../Results"))) {
+  dir.create(here::here("../Results"), recursive = TRUE)
+}
+
+saveRDS(m_nb_base,           here::here("../Results", "m_nb_base_lmer.rds"))
+saveRDS(m_nb_loc_sqm,        here::here("../Results", "m_nb_loc_sqm_lmer.rds"))
+saveRDS(m_nb_loc_rating,     here::here("../Results", "m_nb_loc_rating_lmer.rds"))
+saveRDS(m_nb_loc_beds,       here::here("../Results", "m_nb_loc_beds_lmer.rds"))
+saveRDS(m_nb_loc_bathrooms,  here::here("../Results", "m_nb_loc_bathrooms_lmer.rds"))
+saveRDS(m_nb_loc_sqm_rating, here::here("../Results", "m_nb_loc_sqm_rating_lmer.rds"))
+```
+The location-specific slope estimates showed substantial heterogeneity in how surface area translated into price across destinations. The strongest size premium was observed in Corsica, followed by Antibes and Cannes, whereas the association between size and price was much weaker in Villas Ibiza, Malta, and Bodrum. Rating effects also varied across locations, with stronger associations in Bythesea Amalfi, Dubrovnik, and Kerkyra, and little apparent contribution in Saint-Tropez, Malta, and Bodrum. Overall, these results suggest that destination-specific pricing depends not only on differences in baseline price levels, but also on differences in how strongly villa size and, to a lesser extent, ratings are capitalized into price.
+
+## plot pct
+
+```{r}
+# ── Percent interpretation + visualisations for sqm × location and rating × location ──
+
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(patchwork)
+
+# ============================================================================
+# 1. Extract location-specific slopes from the preferred no-bedroom model
+# ============================================================================
+
+fe <- fixef(m_nb_loc_sqm_rating)
+re <- ranef(m_nb_loc_sqm_rating)$location
+
+location_slopes_nb <- tibble(
+  location     = rownames(re),
+  intercept    = fe["(Intercept)"] + re[, "(Intercept)"],
+  sqm_slope    = fe["sqm_z"]       + re[, "sqm_z"],
+  rating_slope = fe["rating_z"]    + re[, "rating_z"],
+  monthoct_eff = fe["monthoct"]    + re[, "monthoct"]
+) %>%
+  mutate(
+    # approximate % change in price for a 1 SD increase in the predictor
+    sqm_pct_change    = 100 * (exp(sqm_slope) - 1),
+    rating_pct_change = 100 * (exp(rating_slope) - 1)
+  ) %>%
+  arrange(desc(sqm_slope))
+
+# Full table
+location_slopes_nb %>%
+  select(location, sqm_slope, sqm_pct_change, rating_slope, rating_pct_change, monthoct_eff) %>%
+  print(n = Inf)
+
+# Optional: export table
+# write.csv(location_slopes_nb, here::here("../Results", "location_slopes_no_bedrooms.csv"), row.names = FALSE)
+
+# ============================================================================
+# 2. Bar plot: location-specific % change for sqm
+# ============================================================================
+
+plot_sqm_pct <- location_slopes_nb %>%
+  mutate(location = forcats::fct_reorder(location, sqm_pct_change)) %>%
+  ggplot(aes(x = location, y = sqm_pct_change)) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%.1f%%", sqm_pct_change)),
+            hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(
+    title = "Location-specific price premium for surface area",
+    subtitle = "Approximate % change in price for a 1 SD increase in sqm",
+    x = "Location",
+    y = "Price change (%)"
+  ) +
+  expand_limits(y = max(location_slopes_nb$sqm_pct_change) * 1.15) +
+  theme_minimal()
+
+# ============================================================================
+# 3. Bar plot: location-specific % change for rating
+# ============================================================================
+
+plot_rating_pct <- location_slopes_nb %>%
+  mutate(location = forcats::fct_reorder(location, rating_pct_change)) %>%
+  ggplot(aes(x = location, y = rating_pct_change)) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%.1f%%", rating_pct_change)),
+            hjust = ifelse(location_slopes_nb$rating_pct_change[
+              match(as.character(forcats::fct_reorder(location_slopes_nb$location,
+                                                      location_slopes_nb$rating_pct_change)),
+                    as.character(location_slopes_nb$location))] >= 0, -0.1, 1.1),
+            size = 3) +
+  coord_flip() +
+  labs(
+    title = "Location-specific price premium for rating",
+    subtitle = "Approximate % change in price for a 1 SD increase in rating",
+    x = "Location",
+    y = "Price change (%)"
+  ) +
+  theme_minimal()
+
+# If the label positioning above acts weird, use this simpler version instead:
+plot_rating_pct <- location_slopes_nb %>%
+  mutate(location = forcats::fct_reorder(location, rating_pct_change)) %>%
+  ggplot(aes(x = location, y = rating_pct_change)) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%.1f%%", rating_pct_change)),
+            hjust = ifelse(location_slopes_nb %>% arrange(rating_pct_change) %>% pull(rating_pct_change) >= 0, -0.1, 1.1),
+            size = 3) +
+  coord_flip() +
+  labs(
+    title = "Location-specific price premium for rating",
+    subtitle = "Approximate % change in price for a 1 SD increase in rating",
+    x = "Location",
+    y = "Price change (%)"
+  ) +
+  theme_minimal()
+
+# ============================================================================
+# 4. Interaction line plot: sqm × location
+#    Use top 3 and bottom 3 locations by sqm effect for readability
+# ============================================================================
+
+top_bottom_sqm <- location_slopes_nb %>%
+  arrange(desc(sqm_slope)) %>%
+  slice(c(1:3, (n()-2):n())) %>%
+  pull(location)
+
+pred_grid_sqm <- expand.grid(
+  sqm_z       = seq(-2, 2, length.out = 100),
+  rating_z    = 0,
+  bathrooms_z = 0,
+  beds_z      = 0,
+  month       = levels(df_model_no_bedrooms_min$month)[1],
+  location    = top_bottom_sqm
+)
+
+pred_grid_sqm$pred_log_price <- predict(
+  m_nb_loc_sqm_rating,
+  newdata = pred_grid_sqm,
+  re.form = NULL,
+  allow.new.levels = FALSE
+)
+
+pred_grid_sqm$pred_price <- exp(pred_grid_sqm$pred_log_price)
+
+plot_sqm_lines <- ggplot(pred_grid_sqm, aes(x = sqm_z, y = pred_price, colour = location)) +
+  geom_line(linewidth = 1) +
+  labs(
+    title = "sqm × location interaction",
+    subtitle = "Top 3 and bottom 3 locations by sqm effect; other predictors held at 0",
+    x = "Surface area (z-score)",
+    y = "Predicted price"
+  ) +
+  theme_minimal()
+
+# ============================================================================
+# 5. Interaction line plot: rating × location
+#    Use top 3 and bottom 3 locations by rating effect
+# ============================================================================
+
+top_bottom_rating <- location_slopes_nb %>%
+  arrange(desc(rating_slope)) %>%
+  slice(c(1:3, (n()-2):n())) %>%
+  pull(location)
+
+pred_grid_rating <- expand.grid(
+  rating_z    = seq(-2, 2, length.out = 100),
+  sqm_z       = 0,
+  bathrooms_z = 0,
+  beds_z      = 0,
+  month       = levels(df_model_no_bedrooms_min$month)[1],
+  location    = top_bottom_rating
+)
+
+pred_grid_rating$pred_log_price <- predict(
+  m_nb_loc_sqm_rating,
+  newdata = pred_grid_rating,
+  re.form = NULL,
+  allow.new.levels = FALSE
+)
+
+pred_grid_rating$pred_price <- exp(pred_grid_rating$pred_log_price)
+
+plot_rating_lines <- ggplot(pred_grid_rating, aes(x = rating_z, y = pred_price, colour = location)) +
+  geom_line(linewidth = 1) +
+  labs(
+    title = "rating × location interaction",
+    subtitle = "Top 3 and bottom 3 locations by rating effect; other predictors held at 0",
+    x = "Rating (z-score)",
+    y = "Predicted price"
+  ) +
+  theme_minimal()
+
+# ============================================================================
+# 6. Show plots
+# ============================================================================
+
+plot_sqm_pct
+plot_rating_pct
+plot_sqm_lines
+plot_rating_lines
+
+# Optional combined view
+(plot_sqm_pct / plot_rating_pct) | (plot_sqm_lines / plot_rating_lines)
+```
+
+
+# addressing missing values 
+```{r}
+# ── Multiple imputation sensitivity analysis (without bedrooms) ───────────────
+
+
+library(mice)
+
+library(broom.mixed)
+
+# ── 1. Build dataset for imputation ───────────────────────────────────────────
+# Keep only variables needed for the no-bedroom model
+# price, location, and month are kept observed
+df_imp_nb <- df_clean %>%
+  transmute(
+    price,
+    location = as.factor(location),
+    month    = as.factor(month),
+    bathrooms,
+    beds,
+    sqm,
+    rating
+  ) %>%
+  dplyr::filter(
+    !is.na(price),
+    !is.na(location),
+    !is.na(month)
+  )
+
+# Quick missingness check
+colSums(is.na(df_imp_nb))
+
+# ── 2. Set up mice ────────────────────────────────────────────────────────────
+ini  <- mice::mice(df_imp_nb, maxit = 0, printFlag = FALSE)
+meth <- ini$method
+pred <- ini$predictorMatrix
+
+# Do not impute fully observed/grouping variables
+meth["price"]    <- ""
+meth["location"] <- ""
+meth["month"]    <- ""
+
+# Impute numeric predictors with predictive mean matching
+meth[c("bathrooms", "beds", "sqm", "rating")] <- "pmm"
+
+# Reset predictor matrix and define predictors for each imputed variable
+pred[,] <- 0
+
+pred["bathrooms", c("price", "location", "month", "beds", "sqm", "rating")] <- 1
+pred["beds",      c("price", "location", "month", "bathrooms", "sqm", "rating")] <- 1
+pred["sqm",       c("price", "location", "month", "bathrooms", "beds", "rating")] <- 1
+pred["rating",    c("price", "location", "month", "bathrooms", "beds", "sqm")] <- 1
+
+# Optional: inspect setup
+meth
+pred
+
+# ── 3. Run multiple imputation ────────────────────────────────────────────────
+imp_nb <- mice::mice(
+  data = df_imp_nb,
+  m = 20,
+  maxit = 20,
+  method = meth,
+  predictorMatrix = pred,
+  seed = 42,
+  printFlag = TRUE
+)
+
+# Diagnostic plots for imputation
+plot(imp_nb)
+mice::densityplot(imp_nb, ~ bathrooms + beds + sqm + rating)
+mice::stripplot(imp_nb, pch = 20, cex = 0.6)
+
+# ── 4. Fit the mixed model in each imputed dataset ────────────────────────────
+# Standardize within each imputed dataset for comparability with earlier models
+fit_nb <- with(
+  imp_nb,
+  {
+    dat <- data.frame(
+      price = price,
+      location = location,
+      month = month,
+      bathrooms = bathrooms,
+      beds = beds,
+      sqm = sqm,
+      rating = rating
+    )
+
+    dat <- dat %>%
+      mutate(
+        log_price   = log(price),
+        bathrooms_z = as.numeric(scale(bathrooms)),
+        beds_z      = as.numeric(scale(beds)),
+        sqm_z       = as.numeric(scale(sqm)),
+        rating_z    = as.numeric(scale(rating))
+      )
+
+    lmerTest::lmer(
+      log_price ~ bathrooms_z + beds_z + sqm_z + rating_z + month +
+        (1 + month | location),
+      data = dat,
+      REML = FALSE,
+      control = lmerControl(
+        optimizer = "bobyqa",
+        optCtrl = list(maxfun = 1e5)
+      )
+    )
+  }
+)
+
+# ── 5. Pool fixed effects across imputations ──────────────────────────────────
+pooled_nb <- mice::pool(fit_nb)
+summary(pooled_nb, conf.int = TRUE)
+
+# ── 6. Optional: inspect one completed dataset ────────────────────────────────
+dat1 <- mice::complete(imp_nb, action = 1) %>%
+  mutate(
+    log_price   = log(price),
+    bathrooms_z = as.numeric(scale(bathrooms)),
+    beds_z      = as.numeric(scale(beds)),
+    sqm_z       = as.numeric(scale(sqm)),
+    rating_z    = as.numeric(scale(rating))
+  )
+
+dat1 %>% count(location, sort = TRUE)
+
+m_nb_imp1 <- lmerTest::lmer(
+  log_price ~ bathrooms_z + beds_z + sqm_z + rating_z + month +
+    (1 + month | location),
+  data = dat1,
+  REML = FALSE,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(maxfun = 1e5)
+  )
+)
+
+summary(m_nb_imp1)
+isSingular(m_nb_imp1, tol = 1e-4)
+
+# ── 7. Save objects ───────────────────────────────────────────────────────────
+if (!dir.exists(here::here("../Results"))) {
+  dir.create(here::here("../Results"), recursive = TRUE)
+}
+
+saveRDS(imp_nb,      here::here("../Results", "imp_nb_mice.rds"))
+saveRDS(fit_nb,      here::here("../Results", "fit_nb_mice_lmer.rds"))
+saveRDS(pooled_nb,   here::here("../Results", "pooled_nb_mice_lmer.rds"))
+saveRDS(m_nb_imp1,   here::here("../Results", "m_nb_imp1_lmer.rds"))
+```
+
+
+Imputation strategy
+
+Because bedrooms was systematically missing for entire destinations, the imputation analysis was restricted to the no-bedroom model. We used multiple imputation by chained equations (MICE) on the cleaned dataset. Listings with missing price, location, or month were excluded, and these variables were kept observed rather than imputed. Missing values in bathrooms, beds, sqm, and rating were imputed using predictive mean matching (PMM). The imputation model included price, location, month, and the other observed property characteristics as predictors, so that missing values were estimated conditional on both listing features and destination. We generated 20 imputed datasets with 20 iterations each. Within each imputed dataset, continuous predictors were standardized, price was log-transformed, and the no-bedroom price model was fitted. Fixed-effect estimates were then pooled across imputations using Rubin’s rules.
+
+```{r}
+# ── Imputed-data interaction analysis: sqm × location and rating × location ──
+
+
+# ---------------------------------------------------------------------------
+# 1. sqm × location interaction on imputed data
+# ---------------------------------------------------------------------------
+
+fit_sqm_base_mi <- with(
+  imp_nb,
+  {
+    dat <- data.frame(
+      price = price,
+      location = location,
+      month = month,
+      bathrooms = bathrooms,
+      beds = beds,
+      sqm = sqm,
+      rating = rating
+    ) %>%
+      mutate(
+        log_price   = log(price),
+        bathrooms_z = as.numeric(scale(bathrooms)),
+        beds_z      = as.numeric(scale(beds)),
+        sqm_z       = as.numeric(scale(sqm)),
+        rating_z    = as.numeric(scale(rating))
+      )
+
+    lm(
+      log_price ~ bathrooms_z + beds_z + sqm_z + rating_z + month + location,
+      data = dat
+    )
+  }
+)
+
+fit_sqm_int_mi <- with(
+  imp_nb,
+  {
+    dat <- data.frame(
+      price = price,
+      location = location,
+      month = month,
+      bathrooms = bathrooms,
+      beds = beds,
+      sqm = sqm,
+      rating = rating
+    ) %>%
+      mutate(
+        log_price   = log(price),
+        bathrooms_z = as.numeric(scale(bathrooms)),
+        beds_z      = as.numeric(scale(beds)),
+        sqm_z       = as.numeric(scale(sqm)),
+        rating_z    = as.numeric(scale(rating))
+      )
+
+    lm(
+      log_price ~ bathrooms_z + beds_z + sqm_z * location + rating_z + month,
+      data = dat
+    )
+  }
+)
+
+# pooled coefficients
+pooled_sqm_int <- mice::pool(fit_sqm_int_mi)
+summary(pooled_sqm_int, conf.int = TRUE)
+
+# optional omnibus test of the interaction
+mice::D1(fit_sqm_int_mi, fit_sqm_base_mi)
+
+# ---------------------------------------------------------------------------
+# 2. rating × location interaction on imputed data
+# ---------------------------------------------------------------------------
+
+fit_rating_base_mi <- with(
+  imp_nb,
+  {
+    dat <- data.frame(
+      price = price,
+      location = location,
+      month = month,
+      bathrooms = bathrooms,
+      beds = beds,
+      sqm = sqm,
+      rating = rating
+    ) %>%
+      mutate(
+        log_price   = log(price),
+        bathrooms_z = as.numeric(scale(bathrooms)),
+        beds_z      = as.numeric(scale(beds)),
+        sqm_z       = as.numeric(scale(sqm)),
+        rating_z    = as.numeric(scale(rating))
+      )
+
+    lm(
+      log_price ~ bathrooms_z + beds_z + sqm_z + rating_z + month + location,
+      data = dat
+    )
+  }
+)
+
+fit_rating_int_mi <- with(
+  imp_nb,
+  {
+    dat <- data.frame(
+      price = price,
+      location = location,
+      month = month,
+      bathrooms = bathrooms,
+      beds = beds,
+      sqm = sqm,
+      rating = rating
+    ) %>%
+      mutate(
+        log_price   = log(price),
+        bathrooms_z = as.numeric(scale(bathrooms)),
+        beds_z      = as.numeric(scale(beds)),
+        sqm_z       = as.numeric(scale(sqm)),
+        rating_z    = as.numeric(scale(rating))
+      )
+
+    lm(
+      log_price ~ bathrooms_z + beds_z + sqm_z + rating_z * location + month,
+      data = dat
+    )
+  }
+)
+
+# pooled coefficients
+pooled_rating_int <- mice::pool(fit_rating_int_mi)
+summary(pooled_rating_int, conf.int = TRUE)
+
+# optional omnibus test of the interaction
+mice::D1(fit_rating_int_mi, fit_rating_base_mi)
+
+# ---------------------------------------------------------------------------
+# 3. Practical interpretation on one completed dataset
+#    (for readable slopes / emmeans / plots)
+# ---------------------------------------------------------------------------
+
+dat1 <- mice::complete(imp_nb, action = 1) %>%
+  mutate(
+    log_price   = log(price),
+    bathrooms_z = as.numeric(scale(bathrooms)),
+    beds_z      = as.numeric(scale(beds)),
+    sqm_z       = as.numeric(scale(sqm)),
+    rating_z    = as.numeric(scale(rating))
+  )
+
+m_sqm_int_imp1 <- lm(
+  log_price ~ bathrooms_z + beds_z + sqm_z * location + rating_z + month,
+  data = dat1
+)
+
+m_rating_int_imp1 <- lm(
+  log_price ~ bathrooms_z + beds_z + sqm_z + rating_z * location + month,
+  data = dat1
+)
+
+# location-specific slopes from one imputed dataset
+sqm_trends_imp1 <- emtrends(m_sqm_int_imp1, specs = "location", var = "sqm_z")
+rating_trends_imp1 <- emtrends(m_rating_int_imp1, specs = "location", var = "rating_z")
+
+sqm_trends_imp1
+rating_trends_imp1
+
+pairs(sqm_trends_imp1, adjust = "holm")
+pairs(rating_trends_imp1, adjust = "holm")
+
+# ---------------------------------------------------------------------------
+# 4. Simple plots from one completed dataset
+# ---------------------------------------------------------------------------
+
+sqm_trends_df <- as.data.frame(sqm_trends_imp1) %>%
+  mutate(
+    sqm_pct_change = 100 * (exp(sqm_z.trend) - 1),
+    location = forcats::fct_reorder(location, sqm_pct_change)
+  )
+
+rating_trends_df <- as.data.frame(rating_trends_imp1) %>%
+  mutate(
+    rating_pct_change = 100 * (exp(rating_z.trend) - 1),
+    location = forcats::fct_reorder(location, rating_pct_change)
+  )
+
+plot_sqm_imp <- ggplot(sqm_trends_df, aes(x = location, y = sqm_pct_change)) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%.1f%%", sqm_pct_change)),
+            hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(
+    title = "Imputed data: location-specific price premium for sqm",
+    subtitle = "Approximate % change in price for a 1 SD increase in surface area",
+    x = "Location",
+    y = "Price change (%)"
+  ) +
+  expand_limits(y = max(sqm_trends_df$sqm_pct_change) * 1.15) +
+  theme_minimal()
+
+plot_rating_imp <- ggplot(rating_trends_df, aes(x = location, y = rating_pct_change)) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%.1f%%", rating_pct_change)),
+            hjust = ifelse(rating_trends_df$rating_pct_change >= 0, -0.1, 1.1),
+            size = 3) +
+  coord_flip() +
+  labs(
+    title = "Imputed data: location-specific price premium for rating",
+    subtitle = "Approximate % change in price for a 1 SD increase in rating",
+    x = "Location",
+    y = "Price change (%)"
+  ) +
+  theme_minimal()
+
+plot_sqm_imp
+plot_rating_imp
+```
+
+# MLM with villa id, SEM and Networks
+
+```{r}
+# ── Panel workflow: mixed-model ladder + lavaan SEM + networks ────────────────
+# Uses Booking_link (without query string) as villa_id
+# Runs on:
+#   1) df          -> raw complete-case panel workflow
+#   2) df_clean    -> cleaned complete-case panel workflow
+#   3) imputations -> pooled mixed model + pooled lavaan SEM + networks on imp1
+
+
+
+suppressPackageStartupMessages({
+
+  library(lavaan)
+  library(lavaan.mi)
+  library(qgraph)
+})
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+first_non_missing <- function(x) {
+  idx <- which(!is.na(x) & x != "")
+  if (length(idx) == 0) {
+    if (is.numeric(x)) return(NA_real_)
+    return(NA_character_)
+  }
+  x[idx[1]]
+}
+
+safe_median <- function(x) {
+  if (all(is.na(x))) return(NA_real_)
+  median(x, na.rm = TRUE)
+}
+
+fill_with_group_median <- function(x) {
+  if (all(is.na(x))) return(x)
+  replace(x, is.na(x), median(x, na.rm = TRUE))
+}
+
+canon_link <- function(x) sub("\\?.*$", "", x)
+
+# ── Build long panel: one row per villa x month ───────────────────────────────
+make_panel_long <- function(data, min_waves = 2) {
+  panel <- data %>%
+    mutate(
+      villa_id = canon_link(Booking_link),
+      month_raw = as.character(month),
+      month = recode(month_raw,
+                     "jun" = "June",
+                     "aug" = "August",
+                     "oct" = "October",
+                     .default = NA_character_)
+    ) %>%
+    dplyr::filter(
+      month %in% c("June", "August", "October"),
+      !is.na(villa_id),
+      !is.na(location),
+      !is.na(price)
+    ) %>%
+    group_by(villa_id, month) %>%
+    summarise(
+      location   = first_non_missing(location),
+      Villa_name = first_non_missing(Villa_name),
+      price      = safe_median(price),
+      bathrooms  = safe_median(bathrooms),
+      beds       = safe_median(beds),
+      sqm        = safe_median(sqm),
+      rating     = safe_median(rating),
+      n_scrapes  = n(),
+      .groups = "drop"
+    ) %>%
+    group_by(villa_id) %>%
+    mutate(
+      location   = first_non_missing(location),
+      Villa_name = first_non_missing(Villa_name),
+      bathrooms  = fill_with_group_median(bathrooms),
+      beds       = fill_with_group_median(beds),
+      sqm        = fill_with_group_median(sqm)
+    ) %>%
+    ungroup() %>%
+    group_by(villa_id) %>%
+    mutate(n_waves = n_distinct(month)) %>%
+    ungroup() %>%
+    dplyr::filter(n_waves >= min_waves) %>%
+    mutate(
+      month = factor(month, levels = c("June", "August", "October")),
+      villa_id = factor(villa_id),
+      location = factor(location)
+    )
+  
+  panel
+}
+
+# ── Add z-scored variables for long models ────────────────────────────────────
+add_long_vars <- function(dat) {
+  dat %>%
+    mutate(
+      villa_id = factor(villa_id),
+      location = factor(location),
+      month = factor(month, levels = c("June", "August", "October")),
+      month = relevel(month, ref = "August"),
+      log_price   = log(price),
+      bathrooms_z = as.numeric(scale(bathrooms)),
+      beds_z      = as.numeric(scale(beds)),
+      sqm_z       = as.numeric(scale(sqm)),
+      rating_z    = as.numeric(scale(rating))
+    )
+}
+
+# ── Convert long panel to wide panel for lavaan ────────────────────────────────
+make_panel_wide <- function(panel_long) {
+  static <- panel_long %>%
+    dplyr::group_by(villa_id) %>%
+    dplyr::summarise(
+      location  = first_non_missing(as.character(location)),
+      bathrooms = safe_median(bathrooms),
+      beds      = safe_median(beds),
+      sqm       = safe_median(sqm),
+      .groups = "drop"
+    )
+  
+  if ("Villa_name" %in% names(panel_long)) {
+    villa_names <- panel_long %>%
+      dplyr::group_by(villa_id) %>%
+      dplyr::summarise(
+        Villa_name = first_non_missing(Villa_name),
+        .groups = "drop"
+      )
+    static <- dplyr::left_join(static, villa_names, by = "villa_id")
+  }
+
+  waves <- panel_long %>%
+    dplyr::mutate(month = as.character(month)) %>%
+    dplyr::select(villa_id, month, price, rating) %>%
+    dplyr::distinct(villa_id, month, .keep_all = TRUE) %>%
+    tidyr::pivot_wider(
+      names_from  = month,
+      values_from = c(price, rating),
+      names_glue  = "{.value}_{month}"
+    )
+
+  wide <- static %>%
+    dplyr::left_join(waves, by = "villa_id") %>%
+    dplyr::mutate(
+      log_price_June    = log(price_June),
+      log_price_August  = log(price_August),
+      log_price_October = log(price_October),
+      bathrooms_z       = as.numeric(scale(bathrooms)),
+      beds_z            = as.numeric(scale(beds)),
+      sqm_z             = as.numeric(scale(sqm)),
+      rating_June_z     = as.numeric(scale(rating_June)),
+      rating_August_z   = as.numeric(scale(rating_August)),
+      rating_October_z  = as.numeric(scale(rating_October))
+    )
+
+  wide
+}
+
+# ── Mixed-model ladder ─────────────────────────────────────────────────────────
+fit_mixed_ladder <- function(panel_long, dataset_name = "dataset") {
+  dat <- panel_long %>%
+    dplyr::filter(
+      !is.na(price),
+      !is.na(bathrooms),
+      !is.na(beds),
+      !is.na(sqm),
+      !is.na(rating)
+    ) %>%
+    add_long_vars()
+  
+  m0 <- lmerTest::lmer(
+    log_price ~ month + (1 | villa_id),
+    data = dat,
+    REML = FALSE,
+    control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5))
+  )
+  
+  m1 <- lmerTest::lmer(
+    log_price ~ month + bathrooms_z + beds_z + sqm_z + rating_z +
+      (1 | villa_id),
+    data = dat,
+    REML = FALSE,
+    control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5))
+  )
+  
+  m2 <- lmerTest::lmer(
+    log_price ~ month + bathrooms_z + beds_z + sqm_z + rating_z +
+      month:sqm_z + month:rating_z +
+      (1 | villa_id),
+    data = dat,
+    REML = FALSE,
+    control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5))
+  )
+  
+  m3 <- tryCatch(
+    lmerTest::lmer(
+      log_price ~ month + bathrooms_z + beds_z + sqm_z + rating_z +
+        month:sqm_z + month:rating_z +
+        (1 + month | villa_id),
+      data = dat,
+      REML = FALSE,
+      control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5))
+    ),
+    error = function(e) e
+  )
+  
+  cat("\n==============================\n")
+  cat("Mixed ladder:", dataset_name, "\n")
+  cat("==============================\n")
+  print(anova(m0, m1, m2))
+  cat("\nFull fixed-interaction model (m2):\n")
+  print(summary(m2))
+  cat("\nSingular m2:", isSingular(m2, tol = 1e-4), "\n")
+  
+  if (inherits(m3, "merMod")) {
+    cat("\nRandom month-slope model (m3):\n")
+    print(summary(m3))
+    cat("\nSingular m3:", isSingular(m3, tol = 1e-4), "\n")
+  } else {
+    cat("\nm3 failed or was unstable; keep m2 as main panel model.\n")
+  }
+  
+  list(data = dat, m0 = m0, m1 = m1, m2 = m2, m3 = m3)
+}
+
+# ── lavaan SEM model in wide format ────────────────────────────────────────────
+# Panel path model:
+# - structural variables are time-invariant predictors
+# - rating and price have autoregressive continuity
+# - rating predicts price at the same wave
+# - within-wave rating/price residuals are allowed to correlate
+sem_model <- '
+  # autoregressive rating paths
+  rating_August_z  ~ ar_r1*rating_June_z + br1*sqm_z + ba1*bathrooms_z + bb1*beds_z
+  rating_October_z ~ ar_r2*rating_August_z + br2*sqm_z + ba2*bathrooms_z + bb2*beds_z
+
+  # autoregressive price paths
+  log_price_August  ~ ar_p1*log_price_June + pr1*rating_August_z + ps1*sqm_z + pa1*bathrooms_z + pb1*beds_z
+  log_price_October ~ ar_p2*log_price_August + pr2*rating_October_z + ps2*sqm_z + pa2*bathrooms_z + pb2*beds_z
+
+  # within-wave residual covariances
+  rating_June_z    ~~ log_price_June
+  rating_August_z  ~~ log_price_August
+  rating_October_z ~~ log_price_October
+'
+
+fit_lavaan_panel <- function(panel_long, dataset_name = "dataset") {
+  wide <- make_panel_wide(panel_long)
+  
+  fit <- lavaan::sem(
+    sem_model,
+    data = wide,
+    missing = "fiml",
+    fixed.x = FALSE,
+    estimator = "MLR"
+  )
+  
+  cat("\n==============================\n")
+  cat("lavaan panel SEM:", dataset_name, "\n")
+  cat("==============================\n")
+  print(summary(fit, fit.measures = TRUE, standardized = TRUE, rsquare = TRUE))
+  
+  list(data_wide = wide, fit = fit)
+}
+
+extract_sem_paths <- function(fit_obj, dataset_name) {
+  pe <- parameterEstimates(fit_obj, standardized = TRUE)
+
+  est_col  <- intersect(c("est", "Estimate", "estimate"), names(pe))[1]
+  se_col   <- intersect(c("se", "Std.Err", "std.error"), names(pe))[1]
+  stat_col <- intersect(c("z", "t", "statistic"), names(pe))[1]
+  p_col    <- intersect(c("pvalue", "p.value"), names(pe))[1]
+  std_col  <- intersect(c("std.all", "std.all.x"), names(pe))[1]
+
+  pe_out <- pe %>%
+    dplyr::filter(op == "~")
+
+  pe_out$estimate  <- if (!is.na(est_col))  as.numeric(pe_out[[est_col]])  else NA_real_
+  pe_out$std.error <- if (!is.na(se_col))   as.numeric(pe_out[[se_col]])   else NA_real_
+  pe_out$statistic <- if (!is.na(stat_col)) as.numeric(pe_out[[stat_col]]) else NA_real_
+  pe_out$p.value   <- if (!is.na(p_col))    as.numeric(pe_out[[p_col]])    else NA_real_
+  pe_out$std.all   <- if (!is.na(std_col))  as.numeric(pe_out[[std_col]])  else NA_real_
+
+  pe_out %>%
+    dplyr::transmute(
+      dataset   = as.character(dataset_name),
+      lhs       = as.character(lhs),
+      rhs       = as.character(rhs),
+      estimate  = estimate,
+      std.error = std.error,
+      statistic = statistic,
+      p.value   = p.value,
+      std.all   = std.all
+    )
+}
+
+# ── Month-specific networks ────────────────────────────────────────────────────
+estimate_month_networks <- function(panel_long, dataset_name = "dataset") {
+  dat <- panel_long %>%
+    dplyr::filter(
+      !is.na(price),
+      !is.na(bathrooms),
+      !is.na(beds),
+      !is.na(sqm),
+      !is.na(rating)
+    ) %>%
+    add_long_vars() %>%
+    select(month, log_price, bathrooms_z, beds_z, sqm_z, rating_z)
+  
+  month_levels <- levels(dat$month)
+  month_splits <- split(dat, dat$month)
+  
+  weight_mats <- list()
+  n_obs <- c()
+  
+  for (m in month_levels) {
+    x <- month_splits[[m]] %>%
+      select(log_price, bathrooms_z, beds_z, sqm_z, rating_z) %>%
+      drop_na()
+    
+    n_obs[m] <- nrow(x)
+    
+    S <- cor(x)
+    W <- qgraph::EBICglasso(S, n = nrow(x))
+    weight_mats[[m]] <- W
+  }
+  
+  lay <- qgraph::averageLayout(weight_mats$June, weight_mats$August, weight_mats$October)
+  
+  par(mfrow = c(1, 3))
+  qgraph(
+    weight_mats$June,
+    layout = lay,
+    labels = c("Price", "Bath", "Beds", "SQM", "Rating"),
+    title = paste(dataset_name, "- June (n =", n_obs["June"], ")"),
+    theme = "colorblind"
+  )
+  qgraph(
+    weight_mats$August,
+    layout = lay,
+    labels = c("Price", "Bath", "Beds", "SQM", "Rating"),
+    title = paste(dataset_name, "- August (n =", n_obs["August"], ")"),
+    theme = "colorblind"
+  )
+  qgraph(
+    weight_mats$October,
+    layout = lay,
+    labels = c("Price", "Bath", "Beds", "SQM", "Rating"),
+    title = paste(dataset_name, "- October (n =", n_obs["October"], ")"),
+    theme = "colorblind"
+  )
+  par(mfrow = c(1, 1))
+  
+  strength_tbl <- bind_rows(
+    lapply(names(weight_mats), function(m) {
+      tibble(
+        month = m,
+        node = c("Price", "Bath", "Beds", "SQM", "Rating"),
+        strength = rowSums(abs(weight_mats[[m]]))
+      )
+    })
+  ) %>%
+    mutate(dataset = dataset_name)
+  
+  list(weights = weight_mats, strength = strength_tbl)
+}
+
+# ── Build raw and clean long panels ────────────────────────────────────────────
+panel_raw   <- make_panel_long(df, min_waves = 2)
+panel_clean <- make_panel_long(df_clean, min_waves = 2)
+
+cat("\nPanel sizes:\n")
+cat("panel_raw  :", nrow(panel_raw),   "rows from", n_distinct(panel_raw$villa_id),   "villas\n")
+cat("panel_clean:", nrow(panel_clean), "rows from", n_distinct(panel_clean$villa_id), "villas\n")
+
+# ── Panel-level imputation on panel_clean ─────────────────────────────────────
+# MICE with PMM is used for continuous variables such as bathrooms, beds, sqm,
+# and rating; price/month/location/villa_id are kept observed.
+panel_imp_base <- panel_clean %>%
+  select(villa_id, location, month, price, bathrooms, beds, sqm, rating)
+
+ini_imp  <- mice(panel_imp_base, maxit = 0, printFlag = FALSE)
+meth_imp <- ini_imp$method
+pred_imp <- ini_imp$predictorMatrix
+
+meth_imp[c("villa_id", "location", "month", "price")] <- ""
+meth_imp[c("bathrooms", "beds", "sqm", "rating")] <- "pmm"
+
+pred_imp[,] <- 0
+pred_imp["bathrooms", c("price", "location", "month", "beds", "sqm", "rating")] <- 1
+pred_imp["beds",      c("price", "location", "month", "bathrooms", "sqm", "rating")] <- 1
+pred_imp["sqm",       c("price", "location", "month", "bathrooms", "beds", "rating")] <- 1
+pred_imp["rating",    c("price", "location", "month", "bathrooms", "beds", "sqm")] <- 1
+
+imp_panel <- mice(
+  panel_imp_base,
+  m = 20,
+  maxit = 20,
+  method = meth_imp,
+  predictorMatrix = pred_imp,
+  seed = 42,
+  printFlag = TRUE
+)
+
+panel_imp1 <- mice::complete(imp_panel, action = 1)
+
+# ── Mixed model ladder: raw, clean, imputed (pooled + imp1 ladder) ───────────
+mix_raw   <- fit_mixed_ladder(panel_raw,   "panel_raw")
+mix_clean <- fit_mixed_ladder(panel_clean, "panel_clean")
+
+fit_imp_full <- with(
+  imp_panel,
+  {
+    dat <- data.frame(
+      villa_id   = villa_id,
+      location   = location,
+      month      = month,
+      price      = price,
+      bathrooms  = bathrooms,
+      beds       = beds,
+      sqm        = sqm,
+      rating     = rating
+    ) %>%
+      add_long_vars()
+    
+    lmerTest::lmer(
+      log_price ~ month + bathrooms_z + beds_z + sqm_z + rating_z +
+        month:sqm_z + month:rating_z +
+        (1 | villa_id),
+      data = dat,
+      REML = FALSE,
+      control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5))
+    )
+  }
+)
+
+pooled_imp_full <- mice::pool(fit_imp_full)
+
+cat("\n==============================\n")
+cat("Imputed pooled full mixed model\n")
+cat("==============================\n")
+print(summary(pooled_imp_full, conf.int = TRUE))
+
+mix_imp1 <- fit_mixed_ladder(panel_imp1, "panel_imp1 (first completed imputation)")
+
+comp_mixed <- bind_rows(
+  broom.mixed::tidy(mix_raw$m2, effects = "fixed") %>%
+    mutate(dataset = "raw_complete_case") %>%
+    select(dataset, term, estimate, std.error, statistic, p.value),
+  broom.mixed::tidy(mix_clean$m2, effects = "fixed") %>%
+    mutate(dataset = "clean_complete_case") %>%
+    select(dataset, term, estimate, std.error, statistic, p.value),
+  summary(pooled_imp_full, conf.int = TRUE) %>%
+    transmute(
+      dataset   = "imputed_pooled",
+      term      = term,
+      estimate  = estimate,
+      std.error = std.error,
+      statistic = statistic,
+      p.value   = p.value
+    )
+)
+
+cat("\n==============================\n")
+cat("Mixed-model comparison table\n")
+cat("==============================\n")
+print(comp_mixed)
+
+# ── lavaan SEM: raw + clean with FIML, imputed pooled with lavaan.mi ─────────
+sem_raw   <- fit_lavaan_panel(panel_raw,   "panel_raw")
+sem_clean <- fit_lavaan_panel(panel_clean, "panel_clean")
+
+# convert all imputed long panels to wide data sets for pooled SEM
+imp_panel_all <- mice::complete(imp_panel, action = "all")
+imp_wide_list <- lapply(imp_panel_all, make_panel_wide)
+
+sem_imp_mi <- lavaan.mi::sem.mi(
+  model = sem_model,
+  data = imp_wide_list,
+  fixed.x = FALSE,
+  estimator = "MLR"
+)
+
+cat("\n==============================\n")
+cat("lavaan.mi pooled panel SEM (imputed)\n")
+cat("==============================\n")
+print(summary(sem_imp_mi, fit.measures = TRUE, standardized = TRUE, rsquare = TRUE))
+
+sem_compare <- bind_rows(
+  extract_sem_paths(sem_raw$fit,   "raw_complete_case"),
+  extract_sem_paths(sem_clean$fit, "clean_complete_case"),
+  extract_sem_paths(sem_imp_mi,    "imputed_pooled")
+)
+
+cat("\n==============================\n")
+cat("SEM path comparison table\n")
+cat("==============================\n")
+print(sem_compare)
+
+# ── Month-specific networks: raw, clean, imputed first complete ──────────────
+net_raw   <- estimate_month_networks(panel_raw,   "raw")
+net_clean <- estimate_month_networks(panel_clean, "clean")
+net_imp1  <- estimate_month_networks(panel_imp1,  "imputed_first_complete")
+
+network_strength_compare <- bind_rows(
+  net_raw$strength,
+  net_clean$strength,
+  net_imp1$strength
+)
+
+cat("\n==============================\n")
+cat("Network node-strength comparison\n")
+cat("==============================\n")
+print(network_strength_compare)
+```
+Seasonality is the dominant signal — October is ~40-50% cheaper than August (the reference) across all three datasets, very consistent. June is ~17% cheaper than August in the raw data.
+Bathrooms is the strongest property predictor — each SD increase adds ~24-31% to price depending on the dataset. More so than beds or sqm.
+Beds has a small negative effect which is counterintuitive — likely collinearity with bathrooms and sqm eating into its coefficient. Worth flagging.
+sqm effect is stronger in October than August (the interaction is significant) — meaning larger villas hold their value better into the shoulder season.
+Rating effect is small but consistent across datasets — about 2-4% per SD, significant in clean and imputed but marginal in raw.
+Random effects — the villa-level variance (~0.15-0.24) is much larger than residual (~0.04), meaning most price variation is between villas not within villas across months. The model is capturing within-villa seasonality well.
+
+
+```{r}
+# =============================================================================
+# SEASONALITY + LOCATION + NETWORKS
+# =============================================================================
+
+theme_erato <- function() {
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 14),
+      plot.subtitle    = element_text(color = "grey40", size = 11),
+      strip.text       = element_text(face = "bold"),
+      panel.grid.minor = element_blank()
+    )
+}
+theme_set(theme_erato())
+
+fig_path <- here("Figures", "01_visualisations_explorations")
+save_fig <- function(name, width = 9, height = 6) {
+  ggsave(file.path(fig_path, paste0(name, ".png")),
+         width = width, height = height, dpi = 300, bg = "white")
+}
+
+# =============================================================================
+# 1. SEASONALITY
+# =============================================================================
+
+# ── 1a. Model with location as fixed effect to see location × month interaction
+dat_season <- panel_raw %>%
+  dplyr::filter(
+    !is.na(price), !is.na(bathrooms),
+    !is.na(beds), !is.na(sqm), !is.na(rating)
+  ) %>%
+  add_long_vars() %>%
+  mutate(location = factor(location))
+
+m_season <- lmerTest::lmer(
+  log_price ~ month * location + bathrooms_z + beds_z + sqm_z + rating_z +
+    (1 | villa_id),
+  data    = dat_season,
+  REML    = FALSE,
+  control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5))
+)
+
+cat("\n==============================\n")
+cat("Seasonality × Location model\n")
+cat("==============================\n")
+print(summary(m_season))
+
+# ── 1b. Predicted log-price by month × location from model
+pred_season <- expand.grid(
+  month       = levels(dat_season$month),
+  location    = levels(dat_season$location),
+  bathrooms_z = 0,
+  beds_z      = 0,
+  sqm_z       = 0,
+  rating_z    = 0
+) %>%
+  mutate(
+    fit = predict(m_season, newdata = ., re.form = NA),
+    price_pred = exp(fit)
+  )
+
+# ── Plot 1: Predicted price by month × location (heatmap)
+pred_season %>%
+  mutate(month = factor(month, levels = c("June", "August", "October"))) %>%
+  ggplot(aes(x = month, y = location, fill = price_pred)) +
+  geom_tile(color = "white", linewidth = .5) +
+  geom_text(aes(label = paste0("€", comma(round(price_pred)))),
+            size = 3, color = "white", fontface = "bold") +
+  scale_fill_viridis_c(option = "C", labels = label_dollar(prefix = "€"),
+                       name = "Predicted\nPrice (€)") +
+  labs(title = "Model-Predicted Price — Location × Month",
+       subtitle = "Holding property characteristics at their mean (z = 0)",
+       x = NULL, y = NULL)
+save_fig("seasonality_location_heatmap")
+
+# ── Plot 2: Predicted seasonal drop per location (line plot)
+pred_season %>%
+  mutate(month = factor(month, levels = c("June", "August", "October")),
+         location = fct_reorder(location, price_pred, max)) %>%
+  ggplot(aes(x = month, y = price_pred, color = location, group = location)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3) +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  labs(title = "Predicted Seasonal Price Trajectory by Location",
+       subtitle = "Model-predicted prices | property characteristics held at mean",
+       x = NULL, y = "Predicted Price (€)", color = "Location")
+save_fig("seasonality_trajectories")
+
+# ── Plot 3: Seasonal drop magnitude (Aug → Oct) per location
+pred_season %>%
+  dplyr::filter(month %in% c("August", "October")) %>%
+  dplyr::select(location, month, price_pred) %>%
+  pivot_wider(names_from = month, values_from = price_pred) %>%
+  mutate(
+    drop_abs = August - October,
+    drop_pct = (August - October) / August * 100,
+    location = fct_reorder(location, drop_pct)
+  ) %>%
+  pivot_longer(cols = c(drop_abs, drop_pct),
+               names_to = "metric", values_to = "value") %>%
+  mutate(metric = factor(metric,
+                         levels = c("drop_abs", "drop_pct"),
+                         labels = c("Absolute Drop (€)", "% Drop"))) %>%
+  ggplot(aes(x = location, y = value, fill = location)) +
+  geom_col(alpha = .8, show.legend = FALSE) +
+  geom_text(aes(label = ifelse(metric == "% Drop",
+                               paste0(round(value, 1), "%"),
+                               paste0("€", comma(round(value))))),
+            hjust = -.1, size = 3.2) +
+  coord_flip() +
+  facet_wrap(~metric, scales = "free_x") +
+  expand_limits(x = c(0, NA)) +
+  labs(title = "Seasonal Price Drop: August → October by Location",
+       subtitle = "Model-predicted | left = absolute € drop | right = % drop",
+       x = NULL, y = NULL)
+save_fig("seasonal_drop_by_location", width = 11, height = 6)
+
+# ── Plot 4: Observed median price by month × location with n
+panel_raw %>%
+  dplyr::filter(!is.na(price)) %>%
+  mutate(month = factor(as.character(month),
+                        levels = c("June", "August", "October"))) %>%
+  group_by(location, month) %>%
+  summarise(
+    median_price = median(price),
+    n            = n(),
+    .groups      = "drop"
+  ) %>%
+  ggplot(aes(x = month, y = median_price,
+             color = location, group = location)) +
+  geom_line(linewidth = 1) +
+  geom_point(aes(size = n)) +
+  scale_y_continuous(labels = label_dollar(prefix = "€")) +
+  scale_size_continuous(range = c(2, 6)) +
+  facet_wrap(~location, scales = "free_y", ncol = 3) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Observed Median Price by Month — Per Location",
+       subtitle = "Free y-scale | point size = n villas",
+       x = NULL, y = "Median Price (€)", size = "n")
+save_fig("observed_price_trajectories", width = 11, height = 7)
+
+# ── Plot 5: Fixed effects from seasonality model
+broom.mixed::tidy(m_season, effects = "fixed", conf.int = TRUE) %>%
+  dplyr::filter(grepl("month", term)) %>%
+  mutate(term = str_replace_all(term, "month|location", "") %>%
+                str_replace_all(":", " × ") %>%
+                str_trim(),
+         significant = p.value < 0.05) %>%
+  ggplot(aes(x = estimate, y = fct_reorder(term, estimate),
+             color = significant)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = .3, linewidth = .7) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c("FALSE" = "grey60", "TRUE" = "#E15759"),
+                     labels = c("ns", "p < .05")) +
+  labs(title = "Month & Month × Location Fixed Effects",
+       subtitle = "Coefficient plot with 95% CI | reference = August",
+       x = "Estimate (log price)", y = NULL, color = NULL)
+save_fig("seasonality_coef_plot", height = 8)
+
+# =============================================================================
+# 2. LOCATION RANDOM EFFECTS
+# =============================================================================
+
+# ── refit main model with location as random intercept too
+m_location <- lmerTest::lmer(
+  log_price ~ month + bathrooms_z + beds_z + sqm_z + rating_z +
+    month:sqm_z + month:rating_z +
+    (1 | villa_id) + (1 | location),
+  data    = dat_season,
+  REML    = TRUE,
+  control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5))
+)
+
+cat("\n==============================\n")
+cat("Model with location random intercept\n")
+cat("==============================\n")
+print(summary(m_location))
+
+# ── Plot 6: Location random effects (caterpillar plot)
+ranef_location <- ranef(m_location)$location %>%
+  rownames_to_column("location") %>%
+  rename(ranef = `(Intercept)`) %>%
+  mutate(
+    location = fct_reorder(location, ranef),
+    se       = sqrt(as.data.frame(VarCorr(m_location))$vcov[2]),
+    lower    = ranef - 1.96 * se,
+    upper    = ranef + 1.96 * se
+  )
+
+ggplot(ranef_location, aes(x = ranef, y = location)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(xmin = lower, xmax = upper),
+                 height = .3, color = "#4E79A7", linewidth = .8) +
+  geom_point(size = 3, color = "#4E79A7") +
+  labs(title = "Location Random Effects (Intercepts)",
+       subtitle = "Deviation from grand mean log-price | ±1.96 SE",
+       x = "Random Effect (log price)", y = NULL)
+save_fig("location_random_effects")
+
+# =============================================================================
+# 3. NETWORKS
+# =============================================================================
+
+add_long_vars <- function(dat) {
+  dat %>%
+    mutate(
+      villa_id    = factor(villa_id),
+      location    = factor(location),
+      month       = factor(as.character(month),
+                           levels = c("June", "August", "October")),
+      month       = relevel(month, ref = "August"),
+      log_price   = log(price),
+      bathrooms_z = as.numeric(scale(bathrooms)),
+      beds_z      = as.numeric(scale(beds)),
+      sqm_z       = as.numeric(scale(sqm)),
+      rating_z    = as.numeric(scale(rating))
+    )
+}
+
+estimate_month_networks <- function(panel_long, dataset_name = "dataset") {
+  dat <- panel_long %>%
+    dplyr::filter(
+      !is.na(price), !is.na(bathrooms),
+      !is.na(beds), !is.na(sqm), !is.na(rating)
+    ) %>%
+    add_long_vars() %>%
+    dplyr::select(month, log_price, bathrooms_z, beds_z, sqm_z, rating_z)
+
+  month_levels <- c("June", "August", "October")
+  month_splits <- split(dat, dat$month)
+  weight_mats  <- list()
+  n_obs        <- c()
+
+  for (m in month_levels) {
+    if (!m %in% names(month_splits)) next
+    x <- month_splits[[m]] %>%
+      dplyr::select(log_price, bathrooms_z, beds_z, sqm_z, rating_z) %>%
+      drop_na()
+    if (nrow(x) < 10) next
+    n_obs[m]         <- nrow(x)
+    weight_mats[[m]] <- qgraph::EBICglasso(cor(x), n = nrow(x))
+  }
+
+  lay <- do.call(qgraph::averageLayout, weight_mats)
+
+  # ── qgraph plots (one per month)
+  png(file.path(fig_path, paste0("network_", dataset_name, ".png")),
+      width = 1800, height = 700, res = 150)
+  par(mfrow = c(1, length(weight_mats)))
+  for (m in names(weight_mats)) {
+    qgraph(weight_mats[[m]],
+           layout = lay,
+           labels = c("Price", "Bath", "Beds", "SQM", "Rating"),
+           title  = paste0(dataset_name, " — ", m, " (n = ", n_obs[m], ")"),
+           theme  = "colorblind",
+           vsize  = 10)
+  }
+  par(mfrow = c(1, 1))
+  dev.off()
+  cat("Network plot saved for", dataset_name, "\n")
+
+  # ── strength table
+  strength_tbl <- bind_rows(
+    lapply(names(weight_mats), function(m) {
+      tibble(
+        month    = m,
+        node     = c("Price", "Bath", "Beds", "SQM", "Rating"),
+        strength = rowSums(abs(weight_mats[[m]]))
+      )
+    })
+  ) %>% mutate(dataset = dataset_name)
+
+  list(weights = weight_mats, strength = strength_tbl, layout = lay)
+}
+
+# ── fit networks
+net_raw   <- estimate_month_networks(panel_raw,   "raw")
+net_clean <- estimate_month_networks(panel_clean, "clean")
+net_imp1  <- estimate_month_networks(panel_imp1,  "imputed")
+
+# ── Plot 7: Node strength comparison across months and datasets
+network_strength_compare <- bind_rows(
+  net_raw$strength,
+  net_clean$strength,
+  net_imp1$strength
+) %>%
+  mutate(
+    month   = factor(month, levels = c("June", "August", "October")),
+    dataset = factor(dataset, levels = c("raw", "clean", "imputed"))
+  )
+
+ggplot(network_strength_compare,
+       aes(x = month, y = strength, color = dataset, group = dataset)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  facet_wrap(~node, scales = "free_y") +
+  scale_color_manual(values = c("raw"     = "#4E79A7",
+                                "clean"   = "#59A14F",
+                                "imputed" = "#F28E2B")) +
+  labs(title = "Network Node Strength by Month — Raw vs Clean vs Imputed",
+       subtitle = "Higher strength = more strongly connected to other nodes",
+       x = NULL, y = "Strength", color = "Dataset")
+save_fig("network_strength_comparison", width = 11, height = 7)
+
+# ── Plot 8: Strength heatmap per dataset
+network_strength_compare %>%
+  ggplot(aes(x = month, y = node, fill = strength)) +
+  geom_tile(color = "white", linewidth = .5) +
+  geom_text(aes(label = round(strength, 2)), size = 3, color = "white",
+            fontface = "bold") +
+  scale_fill_viridis_c(option = "B", name = "Strength") +
+  facet_wrap(~dataset) +
+  labs(title = "Node Strength Heatmap — Networks by Dataset × Month",
+       x = NULL, y = NULL)
+save_fig("network_strength_heatmap", width = 11, height = 5)
+
+cat("\nAll plots saved to:", fig_path, "\n")
+```
+
+
+```{r}
+# =============================================================================
+# NETWORK PLOTS — Complete chunk
+# =============================================================================
+
+# ── Run networks on all three datasets ────────────────────────────────────────
+net_raw   <- estimate_month_networks(panel_raw,   "raw")
+net_clean <- estimate_month_networks(panel_clean, "clean")
+net_imp1  <- estimate_month_networks(panel_imp1,  "imputed")
+
+# ── Shared layout across all available networks ────────────────────────────────
+all_mats   <- c(net_raw$weights, net_clean$weights, net_imp1$weights)
+all_mats   <- Filter(Negate(is.null), all_mats)
+shared_lay <- do.call(qgraph::averageLayout, all_mats)
+
+node_labels <- c("Price", "Bath", "Beds", "SQM", "Rating")
+node_colors <- c("#E15759", "#4E79A7", "#F28E2B", "#76B7B2", "#59A14F")
+
+# ── Helper: plot a single network ─────────────────────────────────────────────
+plot_net <- function(mat, title, layout, n) {
+  qgraph(mat,
+         layout    = layout,
+         labels    = node_labels,
+         color     = node_colors,
+         title     = paste0(title, " (n = ", n, ")"),
+         theme     = "colorblind",
+         vsize     = 12,
+         esize     = 10,
+         posCol    = "#4E79A7",
+         negCol    = "#E15759",
+         title.cex = 1.1)
+}
+
+# ── Helper: save one dataset across all its months ────────────────────────────
+save_dataset_networks <- function(net_obj, panel_data, dataset_name) {
+  months   <- names(net_obj$weights)
+  n_months <- length(months)
+
+  if (n_months == 0) {
+    cat("No networks found for", dataset_name, "— skipping\n")
+    return(invisible(NULL))
+  }
+
+  png(file.path(fig_path, paste0("network_", dataset_name, "_by_month.png")),
+      width  = 900 * n_months,
+      height = 900,
+      res    = 150)
+  par(mfrow = c(1, n_months), bg = "white")
+
+  for (m in months) {
+    n_obs <- sum(as.character(panel_data$month) == m, na.rm = TRUE)
+    plot_net(net_obj$weights[[m]],
+             title  = paste0(str_to_title(dataset_name), " \u2014 ", m),
+             layout = shared_lay,
+             n      = n_obs)
+  }
+
+  par(mfrow = c(1, 1))
+  dev.off()
+  cat("Saved: network_", dataset_name, "_by_month.png\n", sep = "")
+}
+
+# ── Helper: save one month across all datasets that have it ───────────────────
+save_month_comparison <- function(month_name) {
+  nets <- list(
+    raw     = net_raw$weights[[month_name]],
+    clean   = net_clean$weights[[month_name]],
+    imputed = net_imp1$weights[[month_name]]
+  )
+  ns <- list(
+    raw     = sum(as.character(panel_raw$month)   == month_name, na.rm = TRUE),
+    clean   = sum(as.character(panel_clean$month) == month_name, na.rm = TRUE),
+    imputed = sum(as.character(panel_imp1$month)  == month_name, na.rm = TRUE)
+  )
+
+  available <- Filter(Negate(is.null), nets)
+
+  if (length(available) == 0) {
+    cat("No data for", month_name, "in any dataset — skipping\n")
+    return(invisible(NULL))
+  }
+
+  png(file.path(fig_path, paste0("network_", tolower(month_name), "_comparison.png")),
+      width  = 900 * length(available),
+      height = 900,
+      res    = 150)
+  par(mfrow = c(1, length(available)), bg = "white")
+
+  for (d in names(available)) {
+    plot_net(available[[d]],
+             title  = paste0(str_to_title(d), " \u2014 ", month_name),
+             layout = shared_lay,
+             n      = ns[[d]])
+  }
+
+  par(mfrow = c(1, 1))
+  dev.off()
+  cat("Saved: network_", tolower(month_name), "_comparison.png\n", sep = "")
+}
+
+# ── Save per-dataset plots ────────────────────────────────────────────────────
+save_dataset_networks(net_raw,   panel_raw,   "raw")
+save_dataset_networks(net_clean, panel_clean, "clean")
+save_dataset_networks(net_imp1,  panel_imp1,  "imputed")
+
+# ── Save per-month comparison plots ───────────────────────────────────────────
+save_month_comparison("June")
+save_month_comparison("August")
+save_month_comparison("October")
+
+# =============================================================================
+# GGPLOT SUMMARIES
+# =============================================================================
+
+network_strength_compare <- bind_rows(
+  net_raw$strength,
+  net_clean$strength,
+  net_imp1$strength
+) %>%
+  mutate(
+    month   = factor(month,   levels = c("June", "August", "October")),
+    dataset = factor(dataset, levels = c("raw", "clean", "imputed"))
+  )
+
+# ── Plot 1: Node strength lines per node facet ────────────────────────────────
+ggplot(network_strength_compare,
+       aes(x = month, y = strength, color = dataset, group = dataset)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3) +
+  facet_wrap(~node, scales = "free_y", ncol = 5) +
+  scale_color_manual(values = c("raw"     = "#4E79A7",
+                                "clean"   = "#59A14F",
+                                "imputed" = "#F28E2B")) +
+  labs(title    = "Network Node Strength by Month — Raw vs Clean vs Imputed",
+       subtitle = "Higher strength = more strongly connected to other nodes",
+       x = NULL, y = "Strength", color = "Dataset")
+save_fig("network_strength_by_node", width = 14, height = 5)
+
+# ── Plot 2: Strength heatmap faceted by dataset ───────────────────────────────
+network_strength_compare %>%
+  ggplot(aes(x = month, y = node, fill = strength)) +
+  geom_tile(color = "white", linewidth = .5) +
+  geom_text(aes(label = round(strength, 2)),
+            size = 3, color = "white", fontface = "bold") +
+  scale_fill_viridis_c(option = "B", name = "Strength") +
+  facet_wrap(~dataset, ncol = 3) +
+  labs(title = "Node Strength Heatmap — By Dataset \u00d7 Month",
+       x = NULL, y = NULL)
+save_fig("network_strength_heatmap", width = 12, height = 4)
+
+# ── Plot 3: Strength barplot per month — imputed dataset ──────────────────────
+network_strength_compare %>%
+  dplyr::filter(dataset == "imputed") %>%
+  ggplot(aes(x = node, y = strength, fill = node)) +
+  geom_col(alpha = .85, show.legend = FALSE) +
+  geom_text(aes(label = round(strength, 2)),
+            vjust = -.3, size = 3.2) +
+  scale_fill_manual(values = c("Price"  = "#E15759",
+                               "Bath"   = "#4E79A7",
+                               "Beds"   = "#F28E2B",
+                               "SQM"    = "#76B7B2",
+                               "Rating" = "#59A14F")) +
+  facet_wrap(~month, ncol = 3) +
+  labs(title    = "Node Strength per Month — Imputed Dataset",
+       subtitle = "Strength = sum of absolute edge weights connected to each node",
+       x = NULL, y = "Strength")
+save_fig("network_strength_bars_imputed", width = 11, height = 5)
+
+# ── Plot 4: Edge weights across months — imputed dataset ──────────────────────
+extract_edges <- function(net_obj, dataset_name) {
+  bind_rows(
+    lapply(names(net_obj$weights), function(m) {
+      mat <- net_obj$weights[[m]]
+      rownames(mat) <- node_labels
+      colnames(mat) <- node_labels
+      as.data.frame(mat) %>%
+        rownames_to_column("from") %>%
+        pivot_longer(-from, names_to = "to", values_to = "weight") %>%
+        dplyr::filter(from < to, weight != 0) %>%
+        mutate(
+          month   = m,
+          dataset = dataset_name,
+          edge    = paste(from, "-", to)
+        )
+    })
+  )
+}
+
+edges_all <- bind_rows(
+  extract_edges(net_raw,   "raw"),
+  extract_edges(net_clean, "clean"),
+  extract_edges(net_imp1,  "imputed")
+) %>%
+  mutate(
+    month   = factor(month,   levels = c("June", "August", "October")),
+    dataset = factor(dataset, levels = c("raw", "clean", "imputed"))
+  )
+
+edges_all %>%
+  dplyr::filter(dataset == "imputed") %>%
+  ggplot(aes(x = month, y = weight, color = edge, group = edge)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  scale_color_brewer(palette = "Set2") +
+  labs(title    = "Edge Weights Across Months — Imputed Dataset",
+       subtitle = "Only non-zero edges shown | positive = partial positive association",
+       x = NULL, y = "Partial Correlation (GLASSO)", color = "Edge")
+save_fig("network_edge_weights_imputed", width = 10, height = 6)
+
+# ── Plot 5: Edge weight stability across datasets — August ────────────────────
+edges_all %>%
+  dplyr::filter(month == "August") %>%
+  ggplot(aes(x = dataset, y = weight, color = edge, group = edge)) +
+  geom_line(linewidth = 1, linetype = "dashed") +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, linetype = "dotted", color = "grey50") +
+  scale_color_brewer(palette = "Set2") +
+  labs(title    = "Edge Weight Stability Across Datasets — August",
+       subtitle = "How much do edges change with outlier removal and imputation?",
+       x = NULL, y = "Partial Correlation (GLASSO)", color = "Edge")
+save_fig("network_edge_stability_august", width = 9, height = 6)
+
+cat("\nAll network plots saved to:", fig_path, "\n")
+```
+# =============================================================================
+# SUMMARY OF FINDINGS — Erato Project EDA & Modelling
+# =============================================================================
+
+## 1. Data & Panel Structure
+
+The dataset contains villa rental listings scraped from Booking.com across 
+19 Mediterranean locations, observed across three months: June, August, and 
+October. After matching villas across waves (requiring at least 2 observations), 
+the panel comprised approximately 2,362 unique villas in the raw dataset and 
+1,443 in the outlier-cleaned version. Missing data in property characteristics 
+(bathrooms, beds, sqm, rating) was addressed via multiple imputation (MICE, 
+PMM, m = 20 imputations).
+
+---
+
+## 2. Price Distribution & Outliers
+
+Raw prices were right-skewed with a small number of extreme values. The IQR 
+rule was applied to identify and remove outliers for the clean dataset. Log 
+transformation of price was adopted throughout modelling to normalise the 
+distribution and yield interpretable percentage-change coefficients. A small 
+number of rating entries were corrupted (e.g. 98 instead of 9.8) and were 
+corrected by dividing values above 10 by 10.
+
+---
+
+## 3. Seasonality
+
+Seasonality is the single strongest driver of price variation in this dataset.
+
+- **August** is the clear price peak across all locations.
+- **October** prices are approximately **40–50% lower** than August, an effect 
+  that is highly consistent across datasets (raw, clean, imputed).
+- **June** prices are approximately **17% lower** than August.
+- The sqm × month interaction is significant: **larger villas retain their 
+  value better into October**, suggesting that size provides a buffer against 
+  seasonal price decay.
+- The rating × month interaction is not significant, meaning the rating premium 
+  is stable across seasons.
+
+---
+
+## 4. Location Effects
+
+Substantial price variation exists across locations, even after controlling for 
+property characteristics and seasonality.
+
+**Premium locations** (significantly more expensive than Albufeira, the 
+reference):
+- Saint-Tropez (+170%), Ibiza (+81%), Bythesea Amalfi (+78%), Mykonos (+70%), 
+  Antibes (+49%), Amalfi (+42%), Paros (+35%), Dubrovnik (+33%), Bodrum (+30%)
+
+**Discounted locations** (significantly cheaper than Albufeira):
+- Rhodes (–16%)
+
+**Neutral locations** (no significant difference from Albufeira):
+- Corsica, Lefkada, Mallorca, Malta, Kerkyra, Cannes
+
+**Seasonal drop heterogeneity** — not all locations drop equally in October. 
+Cannes, Saint-Tropez, Antibes, and Malta show *smaller* seasonal drops 
+(positive month × location interactions), suggesting more stable year-round 
+demand. Greek islands (Kerkyra, Lefkada, Mykonos) show relatively steeper 
+October drops.
+
+---
+
+## 5. Property Characteristics
+
+All continuous predictors were z-scored to allow comparison of effect sizes.
+
+| Predictor  | Effect on log(price) | Interpretation                        |
+|------------|----------------------|---------------------------------------|
+| Bathrooms  | +0.24 to +0.31       | Strongest property predictor          |
+| SQM        | +0.07 to +0.10       | Significant positive effect           |
+| Rating     | +0.02 to +0.04       | Small but consistent positive effect  |
+| Beds       | –0.02 to –0.04       | Weak negative (collinear with others) |
+
+Bathrooms is the dominant property-level predictor of price, outperforming 
+beds and sqm. The negative beds coefficient likely reflects collinearity — 
+when holding bathrooms and sqm constant, additional beds may signal smaller 
+individual rooms rather than larger properties.
+
+---
+
+## 6. Model Comparison (Raw vs Clean vs Imputed)
+
+Results are remarkably consistent across all three modelling approaches:
+
+- **Intercepts** range from 8.52–8.62 (log scale), corresponding to a baseline 
+  predicted price of approximately €5,000–€5,500.
+- **October coefficient**: –0.49 to –0.50 across all datasets.
+- **Bathrooms**: +0.24 to +0.31, stable and significant.
+- **sqm × October interaction**: +0.02, consistent and significant.
+
+The consistency across raw, clean, and imputed models gives confidence that 
+the findings are robust to both outlier treatment and missing data assumptions.
+
+---
+
+## 7. Network Analysis
+
+EBICglasso regularised partial correlation networks were estimated separately 
+for each month (June, August, October) across all three datasets. Key patterns:
+
+- **Price** is most strongly connected in **August**, when the pricing signal 
+  is most differentiated across listings.
+- **Bathrooms–Price** and **SQM–Price** edges are the most persistent across 
+  months, consistent with the regression findings.
+- **Rating** shows weak and variable network connections, particularly in June 
+  and October, consistent with its small regression coefficient.
+- Network structure is broadly stable across raw, clean, and imputed datasets, 
+  providing reassurance that edge patterns are not driven by outliers or 
+  missing data.
+
+---
+
+## 8. Key Takeaways
+
+1. **Seasonality dominates** — any pricing model for Mediterranean villas must 
+   account for month as a primary predictor.
+2. **Location premium is large and heterogeneous** — Saint-Tropez and Ibiza 
+   command premiums more than double Albufeira at equivalent property specs.
+3. **Bathrooms > Beds as a pricing signal** — counterintuitive but robust 
+   across all model specifications.
+4. **Larger villas are more seasonally resilient** — the sqm × October 
+   interaction suggests size acts as a hedge against off-peak price decay.
+5. **Results are robust** — consistency across outlier treatments and 
+   imputation strategies strengthens confidence in all findings.
+   
+```{r}
+# ── Full network per dataset (all months pooled) ───────────────────────────────
+
+pool_network <- function(panel_data, dataset_name) {
+  dat <- panel_data |>
+    dplyr::filter(
+      !is.na(price), !is.na(bathrooms),
+      !is.na(beds), !is.na(sqm), !is.na(rating)
+    ) |>
+    add_long_vars() |>
+    dplyr::select(log_price, bathrooms_z, beds_z, sqm_z, rating_z) |>
+    drop_na()
+
+  n   <- nrow(dat)
+  mat <- qgraph::EBICglasso(cor(dat), n = n)
+  rownames(mat) <- node_labels
+  colnames(mat) <- node_labels
+
+  list(mat = mat, n = n, name = dataset_name)
+}
+
+pool_raw   <- pool_network(panel_raw,   "Raw")
+pool_clean <- pool_network(panel_clean, "Clean")
+pool_imp1  <- pool_network(panel_imp1,  "Imputed")
+
+# shared layout across all three pooled networks
+pooled_lay <- qgraph::averageLayout(pool_raw$mat, pool_clean$mat, pool_imp1$mat)
+
+png(file.path(fig_path, "network_full_by_dataset.png"),
+    width = 2700, height = 1000, res = 150)
+par(mfrow = c(1, 3), bg = "white")
+
+for (p in list(pool_raw, pool_clean, pool_imp1)) {
+  qgraph(p$mat,
+         layout    = pooled_lay,
+         labels    = node_labels,
+         color     = node_colors,
+         title     = paste0(p$name, " — All Months (n = ", p$n, ")"),
+         theme     = "colorblind",
+         vsize     = 14,
+         esize     = 12,
+         posCol    = "#4E79A7",
+         negCol    = "#E15759",
+         title.cex = 1.2)
+}
+
+par(mfrow = c(1, 1))
+dev.off()
+cat("Saved: network_full_by_dataset.png\n")
+```
+
+   
+   
+   
+## Session Info
+
+```{r session}
+sessionInfo()
+```
